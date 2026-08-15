@@ -1,0 +1,33 @@
+description: Ultralytics YOLO11n-pose model trained on 已标注数据集.yaml
+author: Ultralytics
+date: '2025-12-15T19:00:51.463598'
+version: 8.3.221
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: pose
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: blue_armor
+  1: red_armor
+  2: grey_armor
+args:
+  batch: 1
+  fraction: 1.0
+  half: false
+  int8: false
+  dynamic: false
+  nms: false
+channels: 3
+kpt_shape:
+- 4
+- 2
+kpt_names:
+  0:
+  - 0
+  - 1
+  - 2
+  - 3
