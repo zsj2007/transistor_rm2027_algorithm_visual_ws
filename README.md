@@ -1,0 +1,241 @@
+# transistor_rm2027_algorithm_visual_ws
+
+2027 赛季步兵自瞄算法仓库：无 ROS2，纯 C++17 / CMake。架构沿用 `sp_vision_25` 的壳 + `transistor_rm2026` 的算法芯，调试可视化通过**共享内存**（System V SHM + POSIX 信号量）在算法进程和独立可视化进程之间传输，替代 2026 仓库里基于 ROS 话题的 `auto_aim_visualizer`。
+
+详细设计见 [MODULES.md](MODULES.md)，搬运清单见 [PORTING.md](PORTING.md)，实车部署细节见 [DEPLOY.md](DEPLOY.md)。
+
+## 快速开始（Ubuntu 22.04 x86_64）
+
+```bash
+# 1. 安装依赖（详见下文）
+# 2. 编译
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+
+# 3. 无硬件自检：视频回放
+./build/infantry_debug configs/infantry_video.yaml
+
+# 4. 另开一个终端，启动可视化（读同一份配置）
+./build/visualizer configs/infantry_video.yaml
+```
+
+## 目录结构
+
+```
+configs/   每台机器人的 YAML 配置（infantry.yaml 实车 / infantry_video.yaml 视频回放）
+assets/    运行资源：YOLO 模型（已入库）、测试视频（已入库）
+io/        硬件抽象层：相机/串口/看门狗/共享内存（含可视化共享内存桥）
+tasks/     算法功能层：检测/跟踪/分类/解算/预测/火控/Stage4 可视化
+tools/     通用工具：日志（spdlog）、数学、CPU 绑核等
+users/     应用层：infantry、infantry_debug、visualizer 三个可执行文件
+```
+
+数据流：`io::Camera → io::GimbalIo(state) → AutoAimPipeline（4 段流水线）→ io::GimbalIo.send() → io::Watchdog`，可视化数据在流水线 Stage4 写入共享内存。
+
+## 1. 依赖安装
+
+### 1.1 系统依赖（apt）
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake git pkg-config \
+  libopencv-dev libfmt-dev libeigen3-dev libspdlog-dev libyaml-cpp-dev \
+  nlohmann-json3-dev libtbb-dev libudev-dev \
+  libsuitesparse-dev \
+  ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+```
+
+串口权限（操作 `/dev/ttyACM*` 需要 `dialout` 组，**改完要重新登录**）：
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+### 1.2 Sophus 和 g2o（源码编译）
+
+```bash
+# Sophus（依赖 Eigen3 + fmt）
+git clone https://github.com/strasdat/Sophus.git
+cd Sophus && git checkout 1.22.10
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SOPHUS_EXAMPLES=OFF -DBUILD_SOPHUS_TESTS=OFF
+make -j$(nproc) && sudo make install
+cd ../..
+
+# g2o（依赖 Eigen3 + suitesparse）
+git clone https://github.com/RainerKuemmerle/g2o.git
+cd g2o && mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release \
+  -DG2O_BUILD_APPS=OFF -DG2O_BUILD_EXAMPLES=OFF \
+  -DG2O_BUILD_LINKED_APPS=OFF -DG2O_BUILD_PLUGINS_DEFAULT=OFF
+make -j$(nproc) && sudo make install
+cd ../..
+
+sudo ldconfig
+```
+
+### 1.3 OpenVINO（CMake 通过 pkg-config 查找）
+
+方法 A（推荐）：去 Intel 官网下载 OpenVINO 2024 Runtime 的 `.deb`（Ubuntu 22.04 amd64）：
+
+```bash
+sudo apt install -y ./openvino_2024.*_ubuntu22_amd64.deb
+# 让 pkg-config 找到 openvino.pc（路径按实际安装版本改）
+export PKG_CONFIG_PATH=/opt/intel/openvino_2024*/runtime/lib/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=/opt/intel/openvino_2024*/runtime/lib:$LD_LIBRARY_PATH
+pkg-config --modversion openvino   # 应输出版本号，如 2024.6.0
+```
+
+方法 B（快速验证）：`pip install openvino==2024.6.0`，再把其 `openvino.pc` 所在目录加入 `PKG_CONFIG_PATH`。
+
+### 1.4 可选依赖
+
+- **ROS2 桥**（`io/ros2/`）：检测到 ROS2 环境才编译，没有也能正常构建（CMake 会提示 `ROS2 not found, skipping ROS2 bridge`）。
+- **TorqueController 力矩下发通道**（`command_channel: torque`）：需要 Ceres 和 `~/TorqueController` 源码，缺任一则仅编译 serial 串口通道（默认即 serial）。
+- **相机 SDK**：海康 `libMvCameraControl.so` 已随仓库入库（`io/camera/lib/`），无需另外安装。
+- **模型与测试视频**：`assets/models/`、`assets/InputVideo/` 已入库，无需下载。
+
+## 2. 编译
+
+```bash
+cd ~/transistor_rm2027_algorithm_visual_ws
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release   # 默认就是 Release，可省略
+cmake --build build -j$(nproc)
+```
+
+生成三个可执行文件：
+
+| 目标 | 用途 |
+|---|---|
+| `build/infantry` | 实车主程序（相机 + 串口/力矩下发） |
+| `build/infantry_debug` | 调试版：多打印滚动帧率 + 每 90 帧各阶段耗时报告 |
+| `build/visualizer` | 独立可视化进程（共享内存读取，无 ROS） |
+
+## 3. 运行
+
+所有命令都在仓库根目录执行（模型/视频路径是相对根目录的）。
+
+### 3.1 实车模式（GigE 相机 + 串口）
+
+```bash
+./build/infantry configs/infantry.yaml
+```
+
+相机网络配置见 [DEPLOY.md](DEPLOY.md)（上位机网卡固定 `192.168.10.25/24`，相机 `192.168.10.10`）。
+
+### 3.2 视频回放调试（无硬件自检）
+
+```bash
+./build/infantry_debug configs/infantry_video.yaml
+```
+
+`infantry_video.yaml` 使用 `assets/InputVideo/infantry_blue.mp4` 循环播放，串口不可用时自动降级继续跑。
+
+### 3.3 可视化（共享内存，无 ROS）
+
+```bash
+# 先跑算法（任意配置），再另开终端：
+./build/visualizer configs/infantry_video.yaml
+```
+
+可视化进程读取算法进程 Stage4 写入共享内存的调试帧，画四个窗口：
+
+- **Armor Detection**：主检测画面（灯条/装甲板/解算结果/云台坐标系/状态文字）
+- **Yaw Visualizer**：云台 yaw 曲线（目标 vs 当前）
+- **RMM visualize**：旋转运动模型平面可视化
+- **Common Debug Oscilloscope**：通用调试示波器
+
+常用选项：
+
+```bash
+./build/visualizer configs/infantry_video.yaml -headless    # 无窗口，只打印接收统计（无显示环境调试）
+./build/visualizer configs/infantry_video.yaml -frames=100  # 收满 100 帧自动退出
+```
+
+窗口内按 `ESC` / `q` 退出，终端里按 `Ctrl+C` / `Ctrl+Z` 也会优雅退出（`Ctrl+Z` 已从默认的挂起改为退出）。相关配置项（两个 config 都有）：
+
+| 配置 | 含义 |
+|---|---|
+| `visualizer.enable` | 总开关（算法侧 + 可视化侧都读） |
+| `visualizer.publish_topics` | 算法侧是否把调试帧写入共享内存（替代 2026 的 ROS 话题） |
+| `visualizer.shm_key` | 共享内存 key，默认 `0x0251`，两个进程必须一致 |
+| `visualizer.show_windows` | 可视化进程是否开窗口 |
+| `visualizer.draw.*` | 每个窗口/图层单独开关 |
+
+可视化进程没启动时，算法侧会自动跳过发布（几乎零开销）；启动后每帧多约 0.5~1ms（Stage4 共享内存拷贝）。不需要调试画面时把 `publish_topics: false` 即可完全关掉。
+
+## 4. 为什么可视化窗口的 framerate 比日志低
+
+**两个 FPS 不是同一个东西：**
+
+- 日志里的 `[FPS] input / pipeline` 是**算法流水线的吞吐**（每秒处理完多少帧）。
+- 可视化窗口里的 `frame rate` 是**可视化进程自己每秒实际渲染并显示了多少帧**。
+
+可视化进程每帧要干的活比算法重：从共享内存拷贝约 14MB 完整快照（原始 1280×1024 图 + RMM + 示波器）、在图上画全部标注、再刷新 4 个窗口。渲染不过来时**中间帧直接丢弃、永远显示最新一帧**（读取侧为 last-writer-wins），所以显示值天然 ≤ 数据到达率，这是设计如此，不是算法变慢或丢数据。
+
+本机实测（视频回放，算法 pipeline 约 70fps）：headless 模式约 69fps（跟得上），开窗口约 48fps——瓶颈在窗口刷新，远程/虚拟显示（如 NoMachine）下差距会更明显。
+
+可视化窗口里有两行可以对照：
+
+- `frame rate`（绿色）：本进程每秒实际渲染的帧数；
+- `data rate`（黄色）：按 `frame_id` 增量统计算法侧的真实发布速率，不受渲染丢帧影响，**和日志里的 pipeline FPS 基本一致**。
+
+想提高渲染帧率：把不看的窗口关掉（`visualizer.draw.rmm`、`visualizer.draw.common_debug_oscilloscope` 等设 `false`），并在本地有线显示上跑。
+
+## 5. 日志怎么看
+
+日志用 spdlog 输出，级别前缀 `[info]` / `[warning]` / `[error]`。
+
+### 5.1 滚动帧率（`[FPS]`，每 30 帧一条）
+
+```text
+[FPS] input 89.4 fps (11.19 ms/frame) | pipeline 82.5 fps (valid results) | in_q 2
+```
+
+| 字段 | 含义 |
+|---|---|
+| `input` | 主循环取帧吞吐，受视频帧率 / 相机帧率 / `frame_rate` 配置限制 |
+| `pipeline` | 流水线真正处理完并取回结果的帧数/秒 |
+| `in_q` | 输入队列深度。持续大于 3~4 说明下游处理不过来，帧在排队（延迟在累积） |
+
+### 5.2 阶段耗时报告（`Auto Aim Performance`，每 90 帧一条）
+
+```text
+========== Auto Aim Performance ==========
+stage1_yolo_latency: avg 53.9 ms [min 26.2, max 65.7]   # 2D 检测总耗时（YOLO 路径）
+yolo_preprocess: avg 0.86 ms                             # 预处理（letterbox 等）
+yolo_infer: avg 12.4 ms                                  # 推理本身
+yolo_infer_wait: avg 38.6 ms                             # 推理排队等待（异步流水线）
+yolo_postprocess: avg 0.15 ms                            # 后处理
+stage2_3d_solve_transform: avg 0.47 ms                   # 3D 解算/坐标系变换
+stage3_predict_command: avg 2.2 ms                       # 预测 + 火控解算
+stage4_visualize_log: avg 0.95 ms                        # 可视化发布 + 视频录制
+stage1_classify_track: avg 0.02 ms                       # 分类/跟踪
+------------------------------------------
+Total(from data init): 89.4 ms
+FPS: 11.2
+```
+
+要点：
+
+- `yolo_infer_wait` 明显偏大说明推理请求在排队（异步 YOLO 流水线），可调 `RP24_YOLO_infer_threads` / `RP24_YOLO_infer_streams`。
+- 挂载可视化后 `stage4_visualize_log` 约 0.5~1ms（共享内存拷贝），没挂时约 0.02ms，属正常。
+- 报告底部 `FPS` 是该 90 帧窗口的端到端吞吐，`input FPS` 和它差得远时，优先看上面的 stage 耗时找瓶颈。
+
+### 5.3 常见提示
+
+```text
+[VisualizerShm] writer ready (publish debug frames via shared memory)   # 可视化发布通道就绪
+Serial port not available, trying reconnect                             # 串口未插/无权限，自动重连（视频模式不影响）
+[Watchdog] init failed, running without watchdog                        # 看门狗没起，程序独立运行
+[visualizer] waiting for algorithm data...                              # 可视化进程已挂接，但算法还没发布数据
+```
+
+## 常见问题
+
+- `pkg-config --modversion openvino` 报错 → 第 1.3 步没配对 `PKG_CONFIG_PATH`。
+- 编译报找不到 g2o/Sophus → 第 1.2 步没装好，`sudo ldconfig` 后再 cmake。
+- 相机连不上 → 检查网卡 IP、`ping 192.168.10.10`、网线/供电。
+- 串口打不开 → 检查 `dialout` 组、`ls /dev/ttyACM*`，改完组要重新登录。
+- 模型路径错误 → 确认从仓库根目录运行，`assets/models/` 完整。
+- 可视化收不到数据 → 确认算法进程先启动（或两端 `shm_key` 一致）、`visualizer.publish_topics: true`。

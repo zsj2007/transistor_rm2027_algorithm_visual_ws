@@ -1,6 +1,7 @@
 #include "RP24_YOLO/RP24_YOLO_Wrapper.h"
 #include "pipeline/AutoAimPipeline.h"
 #include "utils/ThreadPool.h"
+#include "tools/cpu_affinity.hpp"
 
 #include "tools/logger.hpp"
 
@@ -99,10 +100,46 @@ RP24YOLOWrapper::RP24YOLOWrapper(std::shared_ptr<YAML::Node> config_file_ptr, st
     if ((*config_file_ptr)["RP24_YOLO_input_size"]) {
         input_size_ = (*config_file_ptr)["RP24_YOLO_input_size"].as<int>();
     }
+    // 混合架构绑核：OpenVINO 推理线程绑 P 核（cpu_pinning 段，与 other_cores 区分）
+    std::string yolo_core_type = "any";
+    bool yolo_cpu_pinning = false;
+    bool yolo_hyper_threading = true;
+    const YAML::Node& cpu_pin = (*config_file_ptr)["cpu_pinning"];
+    int yolo_pool_threads = 0;
+    std::vector<int> yolo_cores;
+    if (cpu_pin && cpu_pin.IsMap()) {
+        if (cpu_pin["yolo_core_type"]) {
+            yolo_core_type = cpu_pin["yolo_core_type"].as<std::string>();
+        }
+        if (cpu_pin["yolo_enable_cpu_pinning"]) {
+            yolo_cpu_pinning = cpu_pin["yolo_enable_cpu_pinning"].as<bool>();
+        }
+        if (cpu_pin["yolo_enable_hyper_threading"]) {
+            yolo_hyper_threading = cpu_pin["yolo_enable_hyper_threading"].as<bool>();
+        }
+        if (cpu_pin["yolo_pool_threads"]) {
+            yolo_pool_threads = cpu_pin["yolo_pool_threads"].as<int>();
+        }
+        if (cpu_pin["yolo_cores"]) {
+            yolo_cores = tools::cpu_affinity::parseCpuList(cpu_pin["yolo_cores"].as<std::string>());
+        }
+    }
+    // YOLO 专用池：worker 绑 P 核，推理（含 OpenVINO 内部线程）落在 P 核；
+    // 未配置时回退到全局线程池。
+    if (yolo_pool_threads > 0 && !yolo_cores.empty()) {
+        yolo_pool_ = std::make_unique<::utils::ThreadPool>(
+            static_cast<size_t>(yolo_pool_threads), yolo_cores);
+        tools::logger()->info(
+            "[RP24YOLOWrapper] yolo pool: {} threads on cpus [{}]",
+            yolo_pool_threads, cpu_pin["yolo_cores"].as<std::string>());
+    } else {
+        tools::logger()->info("[RP24YOLOWrapper] yolo pool: fallback to global pool");
+    }
     // 根据模型路径选择类别映射：含 "fasternet" 用 17 类，否则用旧 0526 的 9 类
     is_fasternet_model_ = (model_path.find("fasternet") != std::string::npos);
     openvino_infer = std::make_shared<OpenvinoInfer>(
-        xml_path_str, bin_path_str, device, infer_threads, infer_streams, input_size_);
+        xml_path_str, bin_path_str, device, infer_threads, infer_streams, input_size_,
+        yolo_core_type, yolo_cpu_pinning, yolo_hyper_threading);
     cout << "[INFO] Inference model loaded successfully!" << endl;
 
     armor_tracker = std::make_shared<ArmorTracker>(config_file_ptr);
@@ -147,7 +184,11 @@ uint64_t RP24YOLOWrapper::submitFrame(cv::Mat frame, int detect_color, void* use
 
     pending_tasks_.fetch_add(1);
     try {
-        ::utils::threadPool().submit([this, work]() { processOneFrame(work); });
+        if (yolo_pool_) {
+            yolo_pool_->submit([this, work]() { processOneFrame(work); });
+        } else {
+            ::utils::threadPool().submit([this, work]() { processOneFrame(work); });
+        }
     } catch (const std::exception&) {
         // 池已停止等极端情况：不处理该帧
         pending_tasks_.fetch_sub(1);

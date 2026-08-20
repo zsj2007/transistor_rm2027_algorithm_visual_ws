@@ -20,6 +20,7 @@
 #include "utils/PerformanceMonitor.h"
 #include "utils/ThreadPool.h"
 #include "tools/exiter.hpp"
+#include "tools/cpu_affinity.hpp"
 #include "tools/logger.hpp"
 #include "tools/yaml.hpp"
 
@@ -38,6 +39,18 @@ int main(int argc, char * argv[])
     return 0;
   }//这个main在解析key字符串得到合适的config_path
 
+  // ---- 配置读取（提前到最前：cpu_pinning 需在创建任何线程前绑好主线程）----
+  auto yaml = tools::load(config_path);
+  auto config_file_ptr = std::make_shared<YAML::Node>(yaml);
+  //得到YAML::Node的yaml,并且用config_file_ptr指向他
+  // CPU 绑核：主线程绑到 E 核（cpu_pinning.other_cores），后续新建线程继承该亲和；
+  // OpenVINO 推理线程由 cpu_pinning.yolo_core_type 绑到 P 核（在 OpenvinoInfer 内处理）。
+  bool cpu_pinned = tools::cpu_affinity::initFromYaml(yaml);
+  tools::logger()->info(
+    "[CPU] cpu_pinning {} | main thread allowed cpus: {}",
+    cpu_pinned ? "ENABLED" : "DISABLED",
+    tools::cpu_affinity::currentCpusAllowedList());
+
   tools::Exiter exiter;
 
   // ---- io：硬件抽象层（构造即初始化）----
@@ -45,10 +58,7 @@ int main(int argc, char * argv[])
   io::GimbalIo gimbal(config_path);      // 可切换下发模块：serial（原串口）/ torque（TorqueController）
   io::Watchdog watchdog(config_path);    // 看门狗
 
-  // ---- 配置 + 性能监控 + 全局线程池（原节点初始化顺序）----
-  auto yaml = tools::load(config_path);
-  auto config_file_ptr = std::make_shared<YAML::Node>(yaml);
-  //得到YAML::Node的yaml,并且用config_file_ptr指向他
+  // ---- 性能监控 + 全局线程池 ----
   auto node_start_time = std::chrono::steady_clock::now();
   fs::path workspace_path = fs::path(config_path).parent_path().parent_path();  // 项目根
 
@@ -61,6 +71,13 @@ int main(int argc, char * argv[])
   auto performance_monitor = std::make_shared<PerformanceMonitor>(perf_enabled, perf_interval);
 
   int thread_pool_size = yaml["thread_pool_size"] ? yaml["thread_pool_size"].as<int>() : 0;
+  if (thread_pool_size <= 0) {
+    // 0=自动：绑核时按 E 核数量创建线程，避免 18 个 worker 挤在 8 个 E 核上超订
+    thread_pool_size = static_cast<int>(tools::cpu_affinity::otherCpuCount());
+    if (thread_pool_size <= 0) {
+      thread_pool_size = static_cast<int>(std::thread::hardware_concurrency());
+    }
+  }
   ::utils::threadPool(thread_pool_size);
 
   // ---- tasks：算法流水线（四段：2D检测/分类 → 3D解算 → 预测/火控 → 可视化/日志）----

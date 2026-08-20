@@ -1,7 +1,11 @@
 #include "pipeline/AutoAimPipeline.h"
 
+#include "tools/cpu_affinity.hpp"
+#include "tools/logger.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <stdexcept>
@@ -105,6 +109,8 @@ bool AutoAimPipeline::Stage1::isIdle() const
 
 void AutoAimPipeline::Stage1::run()
 {
+    // 流水线各阶段线程绑到 E 核（cpu_pinning.other_cores），主线程已提前绑核，这里兜底
+    tools::cpu_affinity::applyOtherToCurrentThread();
     if (use_rp24_yolo) {
         runAsync();
     } else {
@@ -159,6 +165,9 @@ void AutoAimPipeline::Stage1::runAsync()
                 return !inbox_.empty() || result_wakeup_ || exit_flag;
             });
             if (exit_flag) {
+                // flushAll 内部会再锁 mtx，必须先释放锁，否则同一非递归锁
+                // 二次加锁导致自死锁，退出时 worker 永远 join 不上
+                lock.unlock();
                 flushAll();
                 return;
             }
@@ -330,6 +339,7 @@ bool AutoAimPipeline::Stage2::isIdle() const
 
 void AutoAimPipeline::Stage2::run()
 {
+    tools::cpu_affinity::applyOtherToCurrentThread();
     while (true) {
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [this]() { return !idle.load() || exit_flag; });
@@ -407,6 +417,7 @@ bool AutoAimPipeline::Stage3::isIdle() const
 
 void AutoAimPipeline::Stage3::run()
 {
+    tools::cpu_affinity::applyOtherToCurrentThread();
     while (true) {
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [this]() { return !idle.load() || exit_flag; });
@@ -474,6 +485,16 @@ AutoAimPipeline::Stage4::Stage4(std::shared_ptr<YAML::Node> config_file_ptr,
             log_origin_video,
             log_result_video);
     }
+    if (visualizer_config.enable && visualizer_config.publish_topics) {
+        // 无 ROS2：publish_topics 改为写入共享内存，供独立 visualizer 进程读取
+        shm_writer_ = std::make_unique<VisualizerShmWriter>(config_file_ptr);
+        if (!shm_writer_->valid()) {
+            tools::logger()->warn("[VisualizerShm] writer init failed, visualization publishing disabled");
+            shm_writer_.reset();
+        } else {
+            tools::logger()->info("[VisualizerShm] writer ready (publish debug frames via shared memory)");
+        }
+    }
 }
 
 void AutoAimPipeline::Stage4::start(AutoAimPipelineData& d)
@@ -496,6 +517,7 @@ bool AutoAimPipeline::Stage4::isIdle() const
 
 void AutoAimPipeline::Stage4::run()
 {
+    tools::cpu_affinity::applyOtherToCurrentThread();
     while (true) {
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [this]() { return !idle.load() || exit_flag; });
@@ -531,6 +553,84 @@ void AutoAimPipeline::Stage4::run()
             debug_frame.predictor_type = d->stage3.predictor_result.predictor_type;
             debug_frame.mcu_command_yaw = d->stage3.mcu_command_yaw;
             d->stage4.visualizer_debug_frame = std::move(debug_frame);
+        }
+
+        if (shm_writer_) {
+            const AutoAimVisualizerDebugFrame& f = d->stage4.visualizer_debug_frame;
+            visualizer_shm::DebugData debug_data;
+            debug_data.bullet_velocity = f.bullet_velocity;
+            std::strncpy(debug_data.enemy_color, f.enemy_color.c_str(),
+                visualizer_shm::kMaxEnemyColorLen - 1);
+            debug_data.enemy_color[visualizer_shm::kMaxEnemyColorLen - 1] = '\0';
+            debug_data.pitch = f.pitch;
+            debug_data.yaw = f.yaw;
+            debug_data.roll = f.roll;
+            debug_data.mcu_command_yaw = f.mcu_command_yaw;
+            debug_data.armor_type = static_cast<uint8_t>(f.armor_type);
+            debug_data.predictor_type = static_cast<uint8_t>(f.predictor_type);
+            debug_data.ground_stable_point =
+                visualizer_shm::Point2f{f.ground_stable_point.x, f.ground_stable_point.y};
+
+            debug_data.light_count =
+                std::min<size_t>(f.lights.size(), visualizer_shm::kMaxLights);
+            for (size_t i = 0; i < debug_data.light_count; ++i) {
+                cv::Point2f pts[4];
+                f.lights[i].el.points(pts);
+                for (int j = 0; j < 4; ++j) {
+                    debug_data.lights[i].vertices[j] =
+                        visualizer_shm::Point2f{pts[j].x, pts[j].y};
+                }
+            }
+
+            debug_data.armor_count =
+                std::min<size_t>(f.armors.size(), visualizer_shm::kMaxArmors);
+            for (size_t i = 0; i < debug_data.armor_count; ++i) {
+                const Armor& a = f.armors[i];
+                for (int j = 0; j < 4; ++j) {
+                    if (j < static_cast<int>(a.corners.size())) {
+                        debug_data.armors[i].corners[j] =
+                            visualizer_shm::Point2f{a.corners[j].x, a.corners[j].y};
+                    }
+                    if (j < static_cast<int>(a.light_bar_corners.size())) {
+                        debug_data.armors[i].light_bar_corners[j] =
+                            visualizer_shm::Point2f{a.light_bar_corners[j].x, a.light_bar_corners[j].y};
+                    }
+                }
+                debug_data.armors[i].confidence = a.confidence;
+            }
+
+            debug_data.solved_count =
+                std::min<size_t>(f.solved_results.size(), visualizer_shm::kMaxSolvedResults);
+            for (size_t i = 0; i < debug_data.solved_count; ++i) {
+                const ArmorResult& r = f.solved_results[i];
+                visualizer_shm::ArmorResult& dst = debug_data.solved_results[i];
+                for (int j = 0; j < 4; ++j) {
+                    if (j < static_cast<int>(r.corners.size())) {
+                        dst.corners[j] = visualizer_shm::Point2f{r.corners[j].x, r.corners[j].y};
+                    }
+                    if (j < static_cast<int>(r.armor.light_bar_corners.size())) {
+                        dst.light_bar_corners[j] = visualizer_shm::Point2f{
+                            r.armor.light_bar_corners[j].x, r.armor.light_bar_corners[j].y};
+                    }
+                }
+                dst.center = visualizer_shm::Point2f{r.center.x, r.center.y};
+                dst.center_predicted =
+                    visualizer_shm::Point2f{r.center_predicted.x, r.center_predicted.y};
+                dst.prediction_count = std::min<size_t>(
+                    r.predictions.size(), visualizer_shm::kMaxPredictionsPerArmor);
+                for (size_t p = 0; p < dst.prediction_count; ++p) {
+                    dst.predictions[p] =
+                        visualizer_shm::Point2f{r.predictions[p].x, r.predictions[p].y};
+                }
+                dst.number = r.number;
+                dst.confidence = r.confidence;
+                dst.is_tracked_now = r.is_tracked_now;
+            }
+
+            shm_writer_->publish(debug_data,
+                d->initial.frame,
+                d->stage4.rmm_visualize_frame,
+                d->stage4.common_debug_oscilloscope_frame);
         }
 
         if (two_video_logger) {
@@ -682,6 +782,7 @@ void AutoAimPipeline::resetYawIntegration()
 
 void AutoAimPipeline::schedulerLoop()
 {
+    tools::cpu_affinity::applyOtherToCurrentThread();
     while (!scheduler_exit_.load()) {
         bool any_work = false;
 

@@ -4,7 +4,10 @@
 #include <chrono>
 
 OpenvinoInfer::OpenvinoInfer(string model_path_xml, string model_path_bin, string device,
-                             int infer_threads, int num_streams, int input_size){
+                             int infer_threads, int num_streams, int input_size,
+                             std::string core_type,
+                             bool enable_cpu_pinning,
+                             bool enable_hyper_threading){
     input_shape = {1, static_cast<unsigned long>(input_size), static_cast<unsigned long>(input_size), 3};
     // 限制 CPU 推理并行度：默认会占满所有逻辑核（16）且 TBB arena 大量自旋空转。
     // 单流 + 少量线程，避免 TBB 空转成为最大 CPU 热点。
@@ -16,6 +19,20 @@ OpenvinoInfer::OpenvinoInfer(string model_path_xml, string model_path_bin, strin
     try {
         core.set_property("CPU", ov::inference_num_threads(infer_threads));
         core.set_property("CPU", ov::num_streams(n_requests));
+        // 混合架构绑核：优先 P 核（4 个物理 P 核 / 8 逻辑线程），
+        // 与 cpu_affinity 把其余线程绑 E 核配合，避免推理与检测/预测抢核。
+        if (core_type == "pcore") {
+            core.set_property("CPU",
+                ov::hint::scheduling_core_type(ov::hint::SchedulingCoreType::PCORE_ONLY));
+        } else if (core_type == "ecore") {
+            core.set_property("CPU",
+                ov::hint::scheduling_core_type(ov::hint::SchedulingCoreType::ECORE_ONLY));
+        } else {
+            core.set_property("CPU",
+                ov::hint::scheduling_core_type(ov::hint::SchedulingCoreType::ANY_CORE));
+        }
+        core.set_property("CPU", ov::hint::enable_cpu_pinning(enable_cpu_pinning));
+        core.set_property("CPU", ov::hint::enable_hyper_threading(enable_hyper_threading));
     } catch (const std::exception& e) {
         std::cerr << "[OpenvinoInfer] set_property warning: " << e.what() << std::endl;
     }

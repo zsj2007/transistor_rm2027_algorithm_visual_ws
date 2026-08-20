@@ -46,8 +46,14 @@ public:
     // infer_threads: CPU 推理总线程数（= 流数 × 每流线程数，如 8 = 2流 × 4线程）；
     // num_streams: 执行流数 = 并发推理请求数（1 = 单请求串行）；
     // input_size: 模型输入边长（唯一尺寸来源，配置 RP24_YOLO_input_size）
+    // core_type: 混合架构绑核 pcore / ecore / any（对应 ov::hint::scheduling_core_type）
+    // enable_cpu_pinning: 是否把推理线程固定到对应类型核（P/E）
+    // enable_hyper_threading: 是否允许使用超线程逻辑核（P 核兄弟线程）
     OpenvinoInfer(string model_path_xml, string model_path_bin, string device,
-                  int infer_threads = 4, int num_streams = 1, int input_size = 640);
+                  int infer_threads = 4, int num_streams = 1, int input_size = 640,
+                  std::string core_type = "any",
+                  bool enable_cpu_pinning = false,
+                  bool enable_hyper_threading = true);
     // 线程安全：从请求池领一个空闲 InferRequest，推理+解码后返回结果，支持多帧并行。
     // wait_ms / infer_ms（可选输出）：等待空闲请求耗时 / 纯推理+解码耗时。
     std::vector<Object> infer(const cv::Mat& img, int detect_color,

@@ -12,6 +12,7 @@ add_library(io STATIC
     communication/HeadIMU.cpp
     communication/WatchdogClient.cpp
     shm/SharedMemoryClassifier.cpp
+    shm/VisualizerShm.cpp
     communication.cpp
     gimbal_io.cpp
     watchdog.cpp

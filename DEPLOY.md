@@ -108,3 +108,10 @@ cd ~/try
 - 相机连不上 → 检查网卡 IP、`ping 192.168.10.10`、网线/供电。
 - 串口打不开 → 检查 dialout 组、`ls /dev/ttyACM*`。
 - 模型路径错误 → 确认从 `~/try` 运行，`assets/models/` 完整。
+
+编译（-j2 保守一点，想快点可以改 -j4）：
+cd ~/transistor_rm2027_algorithm_visual_ws
+cmake --build build --target infantry_debug -j2
+运行（用视频配置）：
+cd ~/transistor_rm2027_algorithm_visual_ws
+./build/infantry_debug configs/infantry_video.yaml

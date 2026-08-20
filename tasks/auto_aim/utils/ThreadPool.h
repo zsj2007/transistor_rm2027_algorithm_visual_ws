@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "tools/cpu_affinity.hpp"
+
 namespace utils {
 
 // 通用固定大小线程池。
@@ -20,8 +22,11 @@ namespace utils {
 // 池内线程在无任务时阻塞等待（不空转），用事件通知唤醒。
 class ThreadPool {
 public:
-    explicit ThreadPool(size_t n_threads = std::thread::hardware_concurrency())
-        : workers_(n_threads == 0 ? 1 : n_threads) {
+    // affinity 非空时，每个 worker 启动后绑到指定逻辑 CPU（如 YOLO 池绑 P 核）；
+    // 为空则回退到全局配置的 E 核（cpu_pinning.other_cores）。
+    explicit ThreadPool(size_t n_threads = std::thread::hardware_concurrency(),
+                        const std::vector<int>& affinity = {})
+        : workers_(n_threads == 0 ? 1 : n_threads), affinity_(affinity) {
         for (size_t i = 0; i < workers_.size(); ++i) {
             workers_[i] = std::thread(&ThreadPool::workerLoop, this);
         }
@@ -108,6 +113,12 @@ public:
 
 private:
     void workerLoop() {
+        // 显式亲和（如 YOLO 池的 P 核）优先，否则用全局 E 核配置（主线程已提前绑核，这里兜底）
+        if (!affinity_.empty()) {
+            tools::cpu_affinity::applyToCurrentThread(affinity_);
+        } else {
+            tools::cpu_affinity::applyOtherToCurrentThread();
+        }
         while (true) {
             std::function<void()> task;
             {
@@ -124,6 +135,7 @@ private:
     }//每个 worker 线程一出生就泡在这个循环里：睡觉 → 被叫醒 → 取任务 → 执行 → 再睡觉，直到打烊才下班。
 
     std::vector<std::thread> workers_;
+    std::vector<int> affinity_;
     std::queue<std::function<void()>> tasks_;
     std::mutex mtx_;
     std::condition_variable cv_;

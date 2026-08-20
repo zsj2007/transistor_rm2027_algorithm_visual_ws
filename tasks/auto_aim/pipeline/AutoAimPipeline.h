@@ -27,6 +27,7 @@
 #include "RP24_YOLO/RP24_YOLO_Wrapper.h"
 #include "logger/TwoVideoLogger.h"
 #include "predictor/PredictorMain.h"
+#include "shm/VisualizerShm.h"
 #include "utils/FrameRateCounter.h"
 #include "utils/PerformanceMonitor.h"
 #include "utils/VisualizerConfig.h"
@@ -254,6 +255,7 @@ private:
     struct Stage4 {
         std::shared_ptr<TwoVideoLogger> two_video_logger;
         VisualizerConfig visualizer_config;
+        std::unique_ptr<VisualizerShmWriter> shm_writer_;
         bool log_result_video = false;
         bool log_origin_video = false;
 

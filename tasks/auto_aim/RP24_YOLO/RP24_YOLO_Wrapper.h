@@ -4,6 +4,7 @@
 #include "RP24_YOLO/OpenvinoInfer.h"
 #include "2d_armor_detector/Armor.h"
 #include "2d_armor_detector/ArmorTracker.h"
+#include "utils/ThreadPool.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -78,6 +79,11 @@ private:
 
     std::shared_ptr<OpenvinoInfer> openvino_infer;
     std::shared_ptr<YAML::Node> config_file_ptr;
+    // YOLO 专用线程池：绑 P 核（cpu_pinning.yolo_cores），推理任务在此池执行；
+    // OpenVINO 内部线程继承调用线程亲和，从而也落在 P 核（不依赖官方 hint）。
+    // 注意：必须用全局限定 ::utils（OpenvinoInfer.h 的 using namespace cv 会把
+    // 裸写 utils 解析成 cv::utils 命名空间，导致编译失败）。
+    std::unique_ptr<::utils::ThreadPool> yolo_pool_;
     float lightBarLengthScale = 0.82;
 
     // 新模型（FasterNet-P345_pose，17类）：0-8=蓝(B)，9-16=红(R)

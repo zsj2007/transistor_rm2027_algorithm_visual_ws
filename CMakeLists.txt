@@ -27,3 +27,8 @@ target_link_libraries(infantry ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io tasks)
 
 add_executable(infantry_debug users/infantry_debug.cpp)
 target_link_libraries(infantry_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io tasks)
+
+################## 独立可视化进程（共享内存桥，无 ROS）##################
+add_executable(visualizer users/visualizer.cpp io/shm/VisualizerShm.cpp)
+target_include_directories(visualizer PRIVATE io)
+target_link_libraries(visualizer ${OpenCV_LIBS} yaml-cpp pthread rt)
