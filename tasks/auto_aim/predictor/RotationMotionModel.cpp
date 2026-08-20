@@ -1,6 +1,8 @@
 // RotationMotionModel.cpp
 #include "predictor/RotationMotionModel.h"
 
+#include "tools/logger.hpp"
+
 using namespace Eigen;
 
 RotationMotionModel::RotationMotionModel(ObservedData& initObservedData, std::shared_ptr<RestFrame> rest_frame_, bool is_outpost, double init_r)
@@ -232,7 +234,8 @@ void RotationMotionModel::update(ObservedData& observedData) {
                 debug_flip_flag = 1;
             }
         }
-        std::cout << "RMM Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump!" << std::endl;
+        tools::logger()->debug(
+            "RMM Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump! Yaw jump!");
     }
 
     observedDataHistory.push_back(observedData);

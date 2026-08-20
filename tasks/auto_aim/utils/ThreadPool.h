@@ -87,7 +87,7 @@ public:
         }
     }
 
-    size_t threadCount() const { return workers_.size(); }
+    size_t threadCount() const { return workers_.size(); }//返回 workers_（vector 里存的线程对象）有多少个
 
     // 停止接收新任务，等待已提交任务完成后 join 所有线程。幂等。
     void shutdown() {
@@ -121,7 +121,7 @@ private:
             }
             task();
         }
-    }
+    }//每个 worker 线程一出生就泡在这个循环里：睡觉 → 被叫醒 → 取任务 → 执行 → 再睡觉，直到打烊才下班。
 
     std::vector<std::thread> workers_;
     std::queue<std::function<void()>> tasks_;
@@ -142,3 +142,7 @@ inline ThreadPool& threadPool(size_t n_threads = 0) {
 }
 
 }  // namespace utils
+//线程池的"总机"——整个程序共享一个全局线程池的入口。它用了一个经典技巧：函数内的 static 局部变量实现单例
+//threadPool() = "懒加载 + 线程安全 + 自动销毁"的全局单例线程池：第一次调用按需创建（线程数可指定或自动用核数），之后所有人拿到的都是同一个池，程序结束时自动收摊。
+
+//一个补充：static 局部变量这套"只初始化一次、线程安全、自动析构"的保证，其实正是你前面学的局部 static 的通用威力——这里只是用它来装线程池而已。整个线程池项目到此就完整闭环了

@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <Eigen/Dense>
 #include <Eigen/SVD>
-#include <iostream>
+#include "tools/logger.hpp"
 #include "utils/DataProcessFuncs.h"
 #include "3d_processing/RestFrame.h"
 #include "2d_armor_detector/Armor.h"
@@ -209,8 +209,8 @@ public:
             new_state_yaw = atan2(sin(new_state_yaw), cos(new_state_yaw));
             // 直接更新偏航角状态，保持角速度不变
             state_(0) = new_state_yaw;
-            std::cout << "Yaw jump detected! Updating yaw from " 
-                      << last_yaw_ << " to " << measured_yaw << std::endl;
+            tools::logger()->debug("Yaw jump detected! Updating yaw from {:.2f} to {:.2f}",
+                                   last_yaw_, measured_yaw);
 
             measured_yaw = atan2(sin(measured_yaw), cos(measured_yaw));
             return;

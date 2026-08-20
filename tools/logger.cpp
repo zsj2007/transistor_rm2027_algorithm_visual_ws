@@ -19,7 +19,12 @@ void set_logger()
   file_sink->set_level(spdlog::level::debug);
 
   auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-  console_sink->set_level(spdlog::level::debug);
+  // 控制台只保留 info 及以上（含 [FPS] 帧率行、错误/警告），
+  // 每帧刷屏的 debug 日志（armor_count、aim center yaw pitch 等）只写入文件。
+  console_sink->set_level(spdlog::level::info);
+  // 控制台用精简格式（不带时间戳），方便在一屏内找到 [FPS] 行；
+  // 文件日志保留默认完整格式，便于事后排查。
+  console_sink->set_pattern("[%^%l%$] %v");
 
   logger_ = std::make_shared<spdlog::logger>("", spdlog::sinks_init_list{file_sink, console_sink});
   logger_->set_level(spdlog::level::debug);
