@@ -14,7 +14,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "io/camera.hpp"
-#include "io/communication.hpp"
+#include "io/gimbal_io.hpp"
 #include "io/watchdog.hpp"
 #include "pipeline/AutoAimPipeline.h"
 #include "utils/PerformanceMonitor.h"
@@ -36,18 +36,19 @@ int main(int argc, char * argv[])
   if (cli.has("help") || config_path.empty()) {
     cli.printMessage();
     return 0;
-  }
+  }//这个main在解析key字符串得到合适的config_path
 
   tools::Exiter exiter;
 
   // ---- io：硬件抽象层（构造即初始化）----
   io::Camera camera(config_path);        // 相机/视频/图片，阻塞取帧
-  io::Communication comm(config_path);   // 串口 MCU + HeadIMU + 延迟对齐
+  io::GimbalIo gimbal(config_path);      // 可切换下发模块：serial（原串口）/ torque（TorqueController）
   io::Watchdog watchdog(config_path);    // 看门狗
 
   // ---- 配置 + 性能监控 + 全局线程池（原节点初始化顺序）----
   auto yaml = tools::load(config_path);
   auto config_file_ptr = std::make_shared<YAML::Node>(yaml);
+  //得到YAML::Node的yaml,并且用config_file_ptr指向他
   auto node_start_time = std::chrono::steady_clock::now();
   fs::path workspace_path = fs::path(config_path).parent_path().parent_path();  // 项目根
 
@@ -83,14 +84,14 @@ int main(int argc, char * argv[])
     if (img.empty()) continue;
 
     // ② 传感器状态（延迟对齐后）
-    auto state = comm.state_at(t);
+    auto state = gimbal.stateAt(t);
 
     // ③ 自瞄开关 + HeadIMU 校准（原 processImage 的逻辑）
     bool auto_aim_switch = true;  // 原代码硬编码 true；以后可从电控读取
     if ((!last_auto_aim_switch && auto_aim_switch) &&
         state.use_head_imu && !state.mcu_yaw_online) {
-      comm.recalibrate_head_imu();
-    }
+      gimbal.recalibrateHeadImu();
+    }//开启自瞄的瞬间，如果依赖 HeadIMU，就以此刻系统已经认可的 yaw 为基准，重新对齐 HeadIMU，并计算新的 offset，让重新校准后的 IMU 仍然对应这个 yaw。
     last_auto_aim_switch = auto_aim_switch;
 
     // ④ 组装输入帧，交给流水线
@@ -118,14 +119,18 @@ int main(int argc, char * argv[])
     auto result = pipeline.tryPopResult(std::chrono::steady_clock::now());
     if (!result.valid) continue;
 
+    // 统一下发命令：serial 通道只用 pitch/yaw/fire；torque 通道额外用 auto_aim_enable。
+    // reset 时 torque 通道把 auto_aim_enable 置 false（协议里与旧 reset 相反）。
+    io::GimbalCommand cmd;
     if (result.valid_data.should_send_reset) {
-      comm.send(0.0f, 0.0f, false);
+      cmd.auto_aim_enable = false;
     } else {
-      comm.send(
-        result.valid_data.mcu_command_pitch,
-        result.valid_data.mcu_command_yaw,
-        result.valid_data.predictor_result.fire_flag);
+      cmd.auto_aim_enable = true;
+      cmd.pitch = result.valid_data.mcu_command_pitch;
+      cmd.yaw = result.valid_data.mcu_command_yaw;
+      cmd.fire = result.valid_data.predictor_result.fire_flag;
     }
+    gimbal.send(cmd);
     watchdog.feed_if_needed();
 
     // ⑥ 可视化（原 publishVisualizerFrames）：后续接 tools::Plotter / DataVisualizer

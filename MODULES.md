@@ -13,7 +13,7 @@ tools/    万能工具（日志/绘图/退出/数学，全部来自 S25）
 users/    应用层（步兵主程序）
 ```
 
-数据流：`io::Camera → io::Communication(state) → AutoAimPipeline → io::Communication.send() → io::Watchdog`
+数据流：`io::Camera → io::GimbalIo(state) → AutoAimPipeline → io::GimbalIo.send() → io::Watchdog`
 
 ## configs/
 
@@ -43,6 +43,7 @@ users/    应用层（步兵主程序）
 | communication/CRC.h / CRC.cpp | TR | CRC8 校验 |
 | communication/WatchdogClient.h / .cpp | TR | Unix 域套接字看门狗客户端 |
 | watchdog.hpp / watchdog.cpp | TR 包装 | **看门狗封装**：按 config 周期喂狗，失败自动降级 |
+| gimbal_io.hpp / gimbal_io.cpp | 新增 | **可切换下发模块**：`command_channel: serial | torque` 双通道。serial = 原 `io::Communication` 角度协议（0x42 0x52 0xCD）；torque = TorqueController 的 `RobotController`（MCU/IMU 串口 + 融合 + yaw MPC + 后台 100Hz 发送，由 `~/TorqueController` 源码编入，需 Ceres）。torque 模式下传感器状态改由 `RobotController::getState()` 映射，不再占用旧串口 |
 | other_input/VideoInput.h / .cpp | TR | 视频文件输入（调试用），写入全局帧区 |
 | other_input/ImagesInput.h / .cpp | TR | 图片集输入（调试用），写入全局帧区 |
 | shm/SharedMemoryClassifier.h / .cpp | TR | **多进程共享内存通信窗口**：SHM + POSIX 信号量，把裁剪图发给 Python 分类进程并取回结果（CLASSIFIER_SHM_KEY 从 config 读） |

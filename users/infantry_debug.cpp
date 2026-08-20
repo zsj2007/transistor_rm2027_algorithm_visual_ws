@@ -15,7 +15,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "io/camera.hpp"
-#include "io/communication.hpp"
+#include "io/gimbal_io.hpp"
 #include "io/watchdog.hpp"
 #include "pipeline/AutoAimPipeline.h"
 #include "utils/FrameRateCounter.h"
@@ -44,7 +44,7 @@ int main(int argc, char * argv[])
 
   // ---- io：硬件抽象层（构造即初始化）----
   io::Camera camera(config_path);
-  io::Communication comm(config_path);
+  io::GimbalIo gimbal(config_path);   // 可切换下发模块：serial / torque
   io::Watchdog watchdog(config_path);
 
   // ---- 配置 + 性能监控 + 全局线程池 ----
@@ -89,13 +89,13 @@ int main(int argc, char * argv[])
     if (img.empty()) continue;
 
     // ② 传感器状态（延迟对齐后）
-    auto state = comm.state_at(t);
+    auto state = gimbal.stateAt(t);
 
     // ③ 自瞄开关 + HeadIMU 校准
     bool auto_aim_switch = true;
     if ((!last_auto_aim_switch && auto_aim_switch) &&
         state.use_head_imu && !state.mcu_yaw_online) {
-      comm.recalibrate_head_imu();
+      gimbal.recalibrateHeadImu();
     }
     last_auto_aim_switch = auto_aim_switch;
 
@@ -125,14 +125,16 @@ int main(int argc, char * argv[])
     if (result.valid) {
       result_fps.tick();  // 流水线完成一帧（有效结果）
 
+      io::GimbalCommand cmd;
       if (result.valid_data.should_send_reset) {
-        comm.send(0.0f, 0.0f, false);
+        cmd.auto_aim_enable = false;
       } else {
-        comm.send(
-          result.valid_data.mcu_command_pitch,
-          result.valid_data.mcu_command_yaw,
-          result.valid_data.predictor_result.fire_flag);
+        cmd.auto_aim_enable = true;
+        cmd.pitch = result.valid_data.mcu_command_pitch;
+        cmd.yaw = result.valid_data.mcu_command_yaw;
+        cmd.fire = result.valid_data.predictor_result.fire_flag;
       }
+      gimbal.send(cmd);
       watchdog.feed_if_needed();
 
       // ⑥ 每帧队列深度（debug）

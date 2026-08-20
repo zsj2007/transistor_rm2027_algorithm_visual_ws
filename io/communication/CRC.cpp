@@ -22,19 +22,48 @@ const uint8_t CRC8_TAB[256] = {
 };
 
 // CRC8校验函数定义
-uint8_t CRC8_Check_Sum(uint8_t *pchMessage, uint16_t dwLength) {
+uint8_t CRC8_Check_Sum(const uint8_t *pchMessage, size_t dwLength) {
     uint8_t ucCRC8 = 0xFF;
-    uint16_t i;
     uint8_t ucIndex;
     
     if (pchMessage == NULL) {
         return 0xFF;
     }
     
-    for (i = 0; i < dwLength; i++) {
+    for (size_t i = 0; i < dwLength; i++) {
         ucIndex = ucCRC8 ^ (pchMessage[i]);
         ucCRC8 = CRC8_TAB[ucIndex];
     }
     
     return ucCRC8;
+}
+
+// CRC32校验函数（STM32 HAL 兼容，多项式 0x04C11DB7，与 TorqueController 一致）
+uint32_t CRC32_Calculate(const uint8_t* data, size_t length) {
+    const uint32_t POLYNOMIAL = 0x04C11DB7;
+    uint32_t crc = 0xFFFFFFFF;
+
+    for (size_t i = 0; i < length; i += 4) {
+        uint32_t word = 0;
+        if (i + 3 < length) {
+            word = *reinterpret_cast<const uint32_t*>(&data[i]);
+        } else {
+            // 处理不足4字节的情况
+            for (size_t j = 0; j < 4 && i + j < length; ++j) {
+                word |= static_cast<uint32_t>(data[i + j]) << (8 * j);
+            }
+        }
+
+        crc ^= word;
+
+        for (int j = 0; j < 32; ++j) {
+            if (crc & 0x80000000) {
+                crc = (crc << 1) ^ POLYNOMIAL;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+
+    return crc;
 }

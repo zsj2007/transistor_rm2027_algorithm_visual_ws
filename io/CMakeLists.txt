@@ -13,6 +13,7 @@ add_library(io STATIC
     communication/WatchdogClient.cpp
     shm/SharedMemoryClassifier.cpp
     communication.cpp
+    gimbal_io.cpp
     watchdog.cpp
 )
 
@@ -35,6 +36,35 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
   target_link_libraries(io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/camera/lib/arm64/libMvCameraControl.so yaml-cpp udev pthread)
 else()
   message(FATAL_ERROR "Unsupported architecture: ${CMAKE_HOST_SYSTEM_PROCESSOR}!")
+endif()
+
+################## TorqueController 下发通道（可选） ##################
+# command_channel=torque 时使用：把 ~/TorqueController 的 RobotController 编进 io 库。
+# 需要 Ceres（MPC 求解）与 TorqueController 源码；缺任一则仅编译 serial 通道。
+set(TORQUE_CONTROLLER_DIR "$ENV{HOME}/TorqueController" CACHE PATH "TorqueController 源码目录")
+find_package(Ceres QUIET)
+if(Ceres_FOUND AND EXISTS "${TORQUE_CONTROLLER_DIR}/include/RobotController.h")
+  message(STATUS "TorqueController channel enabled: ${TORQUE_CONTROLLER_DIR}")
+  # 注意：不编入 TorqueController 的 CRC.cpp，CRC8/CRC32 统一用 io/communication/CRC.cpp，
+  # 避免 CRC8_TAB 重复定义。
+  target_sources(io PRIVATE
+    ${TORQUE_CONTROLLER_DIR}/src/RobotController.cpp
+    ${TORQUE_CONTROLLER_DIR}/src/communication/FusionFilter.cpp
+    ${TORQUE_CONTROLLER_DIR}/src/communication/McuDataPreprocessor.cpp
+    ${TORQUE_CONTROLLER_DIR}/src/mpc/mpc_controller.cpp
+    ${TORQUE_CONTROLLER_DIR}/src/mpc/yaw_mpc_controller.cpp
+    ${TORQUE_CONTROLLER_DIR}/src/mpc/mcu_mpc_controller.cpp
+  )
+  target_include_directories(io PRIVATE
+    ${TORQUE_CONTROLLER_DIR}/include
+    ${TORQUE_CONTROLLER_DIR}/include/communication
+    ${TORQUE_CONTROLLER_DIR}/include/mpc
+  )
+  target_include_directories(io PRIVATE ${CERES_INCLUDE_DIRS})
+  target_link_libraries(io PRIVATE ${CERES_LIBRARIES})
+  target_compile_definitions(io PUBLIC IO_ENABLE_TORQUE_CONTROLLER=1)
+else()
+  message(WARNING "TorqueController channel disabled: Ceres or ~/TorqueController not found, serial only.")
 endif()
 
 ################## 检查 ROS 环境（可选 ROS 桥） ##################

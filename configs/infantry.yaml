@@ -27,6 +27,35 @@ RP24_YOLO_input_size : 640 # 模型输入边长，必须与模型一致
 RP24_YOLO_infer_threads : 8 # 推理总线程数
 RP24_YOLO_infer_streams : 1 # 并发推理请求数
 
+# 下发通道：serial（原串口角度协议 0x42 0x52 0xCD）| torque（TorqueController MPC 力矩协议）
+# torque 通道由 ~/TorqueController 的 RobotController 接管 MCU/IMU 串口、融合与 100Hz 发送，
+# 此时不再使用旧的 io::Communication 串口，传感器状态改由 TorqueController 融合结果提供。
+command_channel : "serial"
+
+# TorqueController 参数（command_channel=torque 时使用，默认值与 ~/TorqueController/src/control_demo.cpp 一致）
+torque_controller:
+  dt_control : 0.01            # 控制周期 s（后台 100Hz 发送）
+  mpc_pred_N : 20              # MPC 预测步数（yaw 目标延迟 = dt_control × N = 0.2s，有意设计）
+  J : 0.016541                 # 辨识参数：转动惯量
+  tau_c : 0.097297             # 辨识参数：库仑摩擦
+  b : 0.0321                   # 辨识参数：粘滞摩擦
+  tau_d : 0.0                  # 辨识参数（通常置 0）
+  max_torque : 1.0             # N·m
+  max_torque_rate : 40.0       # N·m/s
+  Q : 5.0                      # MPC 权重
+  R : 0.01
+  Rd : 0.1
+  max_iter : 30                # MPC 最大迭代
+  integral_gain : 0.01         # yaw 力矩积分补偿比例系数
+  yaw_torque_only_mode : false # 仅力矩控制模式
+  integral_enable : false      # 是否启用 yaw 力矩积分补偿
+  sequence_mode : false        # 是否使用序列模式（暂未接入）
+  # MCU 数据线性标定（默认 = Infantry1 当前标定；其他车参考 ~/TorqueController/data/cars/*/LinearParams.txt）
+  send_pitch_scale : 20.523245
+  send_pitch_offset : 0.475049
+  recv_pitch_scale : 1.122635
+  recv_pitch_offset : -0.170755
+
 # ArmorDetect_Node 参数
 init_enemy_color : "BLUE" # 初始敌方颜色，连接至电控后会自动获取敌方颜色并覆盖此值
 max_armor_position_height : 1500.0 # 最大装甲板高度，超过此值视为无效
