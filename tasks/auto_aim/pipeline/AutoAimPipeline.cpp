@@ -359,8 +359,8 @@ void AutoAimPipeline::Stage2::run()
         // 用引用遍历，避免每块装甲板按值拷贝一次 ArmorResult（内含多个 vector/Mat）
         for (ArmorResult& classify_result : d->stage1.classify_results) {
             AimResult solve_armor_result =
-                armor_solver->solveArmor(classify_result, d->initial.pitch, d->initial.yaw);
-            cv::Point3f rest_frame_pos = rest_frame->pnpToWorldP3f(solve_armor_result.position);
+                armor_solver->solveArmor(classify_result, d->initial.pitch, d->initial.yaw);//pnp
+            cv::Point3f rest_frame_pos = rest_frame->pnpToWorldP3f(solve_armor_result.position);//restframe
             if (rest_frame_pos.z < max_armor_position_height && solve_armor_result.valid) {
                 classify_result.solve_armor_result = solve_armor_result;
                 d->stage2.solved_results.emplace_back(std::move(classify_result));

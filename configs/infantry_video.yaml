@@ -53,15 +53,15 @@ visualizer:
   show_windows: true # 是否显示窗口（由独立 visualizer 进程读取）
   publish_topics: true # 是否发布调试帧到共享内存（替代 ROS 话题，供 visualizer 进程读取）
   shm_key: 0x0251 # 可视化共享内存 key（与 visualizer 进程保持一致）
-  log_video: true # 是否录制视频
+  log_video: false # 是否录制视频
 
-frame_rate : 90.0 # fps
+frame_rate : 30.0 # fps
 serial_delay_time : 30.0 # ms 电控传来的信息相对相机画面快的时间，将对电控信息再延迟这个时间以同步两者
 extra_predict_time : 0.170 # s 除了弹丸飞行时间以外的需要预测器补偿的总时间
 
 # 自瞄流水线耗时统计
 performance_monitor_enabled : true
-performance_monitor_report_interval : 90 # 累计多少帧输出一次平均耗时
+performance_monitor_report_interval : 30 # 累计多少帧输出一次平均耗时
 
 # 线程池参数
 thread_pool_size : 0 # 全局线程池线程数，0=自动（逻辑核数）

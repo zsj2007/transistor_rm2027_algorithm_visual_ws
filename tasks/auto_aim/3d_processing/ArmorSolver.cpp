@@ -410,3 +410,68 @@ double ArmorSolver::getMaxFOVAngle(int width, int height) const {
         max_angle * 180.0 / M_PI, max_angle, width, height);
     return max_angle;
 }
+/*最后，把所有相关代码压缩成这一张图
+
+你现在如果只想抓住项目里的 PnP 核心思路，记这张就够了：
+
+                    YAML
+                     │
+           ┌─────────┴──────────┐
+           ↓                    ↓
+     camera_matrix          dist_coeffs
+           │                    │
+           └─────────┬──────────┘
+                     │
+Stage1               │
+   │                 │
+   │ light_bar_corners
+   ▼
+装甲板图像中的 4 个 2D 点
+                     │
+真实大小              │
+   │                  │
+large/small armor     │
+   ↓                  │
+构造 4 个真实 3D 点 ──┘
+          │
+          ▼
+   ┌──────────────┐
+   │ cv::solvePnP │
+   │     IPPE     │
+   └──────┬───────┘
+          │
+     ┌────┴─────┐
+     ▼          ▼
+   tvec        rvec
+     │           │
+     │       Rodrigues
+     │           ↓
+     │           R
+     │           │
+     │       提取 YPR
+     │           │
+     │       + IMU姿态
+     │           │
+     │          BA
+     │           ↓
+     │      优化后姿态
+     │
+     ↓
+相机坐标3D位置
+     ↓
+计算 distance
+     ↓
+相机→枪口偏移
+     ↓
+result.position
+     ↓
+Stage2 RestFrame
+     ↓
+世界/稳定坐标
+     ↓
+Tracker / Predictor
+一句话概括
+
+你们这套 PnP 的主要思路就是：用“已知真实尺寸的灯条四点”和“图像中检测到的灯条四点”，结合相机标定参数，通过 solvePnP(IPPE) 求出装甲板相对于相机的 3D 位置 tvec 和姿态 rvec；位置再做枪口偏移和世界坐标转换，姿态则进一步结合 IMU 并通过 BA 优化，最后交给追踪和预测模块。
+
+其中你当前最值得抓牢的不是 BA 的数学细节，而是 3D真实点 + 2D检测点 + 相机内参 → rvec/tvec 这条主链。后面的代码基本都是围绕 PnP 输出做坐标系变换、姿态优化和结果使用。*/

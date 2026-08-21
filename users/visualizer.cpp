@@ -214,12 +214,6 @@ private:
     std::deque<double> frame_time_history_;
     double frame_time_sum_ = 0.0;
 
-    // 数据速率：按 frame_id 增量统计算法侧的真实发布速率（渲染丢帧不影响该值）
-    uint64_t last_data_frame_id_ = 0;
-    std::chrono::steady_clock::time_point last_data_rate_time_;
-    std::deque<double> data_rate_history_;
-    double data_rate_sum_ = 0.0;
-
     float last_current_yaw_ = 0.0f;
     float last_target_yaw_ = 0.0f;
     int current_yaw_circle_ = 0;
@@ -234,6 +228,7 @@ private:
                   << " | lights=" << d.light_count
                   << " armors=" << d.armor_count
                   << " solved=" << d.solved_count
+                  << " alg_fps=" << snap.writer_fps
                   << " | yaw=" << d.yaw << " pitch=" << d.pitch
                   << " raw=" << snap.raw_frame.cols << "x" << snap.raw_frame.rows
                   << " rmm=" << snap.rmm_frame.bytes << "B"
@@ -327,6 +322,7 @@ private:
     void drawStatusText(cv::Mat& image, const visualizer_shm::Snapshot& snap)
     {
         const visualizer_shm::DebugData& msg = snap.debug;
+        const float render_fps = updateFrameRate();
         cv::putText(image,
             cv::format("V: %.1f m/s, P: %.1f, Y: %.1f",
                 msg.bullet_velocity, msg.pitch, msg.yaw),
@@ -360,14 +356,14 @@ private:
         const auto since_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_time_).count();
         cv::putText(image,
-            cv::format("frame rate: %.1f fps", updateFrameRate()),
+            cv::format("frame rate: %.1f fps", render_fps),
             cv::Point(20, 140),
             cv::FONT_HERSHEY_COMPLEX,
             0.7,
             cv::Scalar(0, 255, 0),
             1);
         cv::putText(image,
-            cv::format("data rate: %.1f fps", updateDataRate(snap.frame_id)),
+            cv::format("algorithm rate: %.1f fps", snap.writer_fps),
             cv::Point(20, 170),
             cv::FONT_HERSHEY_COMPLEX,
             0.7,
@@ -387,34 +383,6 @@ private:
             0.7,
             cv::Scalar(0, 255, 0),
             1);
-    }
-
-    float updateDataRate(uint64_t frame_id)
-    {
-        const auto now = std::chrono::steady_clock::now();
-        if (last_data_frame_id_ == 0) {
-            last_data_frame_id_ = frame_id;
-            last_data_rate_time_ = now;
-            return 0.0f;
-        }
-
-        const double dt = std::chrono::duration<double>(now - last_data_rate_time_).count();
-        const uint64_t delta = frame_id > last_data_frame_id_ ? frame_id - last_data_frame_id_ : 0;
-        last_data_frame_id_ = frame_id;
-        last_data_rate_time_ = now;
-
-        if (dt <= 0.0 || delta == 0) {
-            return 0.0f;
-        }
-
-        const double rate = static_cast<double>(delta) / dt;
-        data_rate_history_.push_back(rate);
-        data_rate_sum_ += rate;
-        while (data_rate_history_.size() > 10) {
-            data_rate_sum_ -= data_rate_history_.front();
-            data_rate_history_.pop_front();
-        }
-        return static_cast<float>(data_rate_sum_ / static_cast<double>(data_rate_history_.size()));
     }
 
     float updateFrameRate()

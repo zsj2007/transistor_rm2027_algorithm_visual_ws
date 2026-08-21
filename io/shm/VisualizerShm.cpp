@@ -162,9 +162,24 @@ bool VisualizerShmWriter::publish(const visualizer_shm::DebugData& debug,
     copyImage(raw_frame, snap.raw_frame);
     copyImage(rmm_frame, snap.rmm_frame);
     copyImage(cdo_frame, snap.cdo_frame);
-    snap.writer_timestamp_ms = static_cast<int64_t>(
+    const int64_t now_ms = static_cast<int64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+    snap.writer_timestamp_ms = now_ms;
+
+    // 发布帧率：writer 自身滚动 1s 窗口实测（等价于流水线吞吐，无接收侧采样抖动）
+    publish_times_ms_.push_back(now_ms);
+    while (!publish_times_ms_.empty() && now_ms - publish_times_ms_.front() > 1000) {
+        publish_times_ms_.pop_front();
+    }
+    if (publish_times_ms_.size() >= 2) {
+        const double span_s =
+            static_cast<double>(now_ms - publish_times_ms_.front()) / 1000.0;
+        snap.writer_fps = static_cast<float>(
+            static_cast<double>(publish_times_ms_.size() - 1) / span_s);
+    } else {
+        snap.writer_fps = 0.0f;
+    }
 
     // 帧号最后写：保证 reader 读到的 frame_id 之前的数据是完整的一帧
     __sync_synchronize();

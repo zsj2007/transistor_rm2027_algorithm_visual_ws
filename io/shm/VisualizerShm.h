@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
 
@@ -121,6 +122,8 @@ struct Snapshot {
     uint64_t frame_id = 0;
     // writer 稳态时钟毫秒，reader 可据此判断数据是否新鲜
     int64_t writer_timestamp_ms = 0;
+    // writer 侧实测的发布帧率（滚动 1s 窗口，等价于算法流水线吞吐）
+    float writer_fps = 0.0f;
 
     DebugData debug;
     RawImage raw_frame;
@@ -175,6 +178,7 @@ private:
     visualizer_shm::SharedLayout* shared_ = nullptr;
     sem_t* sem_ = SEM_FAILED;
     uint64_t next_frame_id_ = 1;
+    std::deque<int64_t> publish_times_ms_;
 };
 
 // 可视化侧读取器：等待新帧并拷贝到本进程内存

@@ -164,23 +164,24 @@ cmake --build build -j$(nproc)
 
 可视化进程没启动时，算法侧会自动跳过发布（几乎零开销）；启动后每帧多约 0.5~1ms（Stage4 共享内存拷贝）。不需要调试画面时把 `publish_topics: false` 即可完全关掉。
 
-## 4. 为什么可视化窗口的 framerate 比日志低
+## 4. frame rate / algorithm rate / 日志 FPS 到底是什么
 
-**两个 FPS 不是同一个东西：**
+这三个数各自测量的是**不同环节的速率**，别拿它们直接对等：
 
-- 日志里的 `[FPS] input / pipeline` 是**算法流水线的吞吐**（每秒处理完多少帧）。
-- 可视化窗口里的 `frame rate` 是**可视化进程自己每秒实际渲染并显示了多少帧**。
+| 数值 | 谁测的 | 含义 |
+|---|---|---|
+| 日志 `[FPS] input` | 算法主循环 | 每秒从相机/视频读到多少帧，受视频帧率或 `frame_rate` 配置限制 |
+| 日志 `[FPS] pipeline` | 算法主循环 | 流水线真正处理完（4 段跑完）并被取回的帧数/秒，即算法实际吞吐 |
+| 窗口 `algorithm rate`（黄） | 算法 Stage4 | 每帧写入共享内存的发布速率，由发布侧滚动 1s 窗口实测，**和日志 pipeline FPS 一致** |
+| 窗口 `frame rate`（绿） | 可视化进程 | 可视化进程自己每秒实际渲染并显示了多少帧 |
 
-可视化进程每帧要干的活比算法重：从共享内存拷贝约 14MB 完整快照（原始 1280×1024 图 + RMM + 示波器）、在图上画全部标注、再刷新 4 个窗口。渲染不过来时**中间帧直接丢弃、永远显示最新一帧**（读取侧为 last-writer-wins），所以显示值天然 ≤ 数据到达率，这是设计如此，不是算法变慢或丢数据。
+为什么 `frame rate` 会明显低于另外两个：可视化进程每帧要拷贝约 14MB 快照（原始 1280×1024 图 + RMM + 示波器）、画全部标注、再刷新 4 个窗口，渲染不过来时**中间帧直接丢弃、永远显示最新一帧**（last-writer-wins），所以它天然 ≤ 算法发布速率。这是设计如此，不是算法变慢或丢数据。本机实测（pipeline 约 70fps）：headless 模式约 69fps（跟得上），开窗口约 48fps——瓶颈在窗口刷新，远程/虚拟显示（如 NoMachine）下差距更大。
 
-本机实测（视频回放，算法 pipeline 约 70fps）：headless 模式约 69fps（跟得上），开窗口约 48fps——瓶颈在窗口刷新，远程/虚拟显示（如 NoMachine）下差距会更明显。
+为什么日志 `input` 和 `pipeline` 也有差异：`input` 是取帧上限，`pipeline` 是算法真实处理能力（含 YOLO 推理等），处理不过来时 pipeline 低于 input，此时 `in_q`（输入队列深度）会持续大于 3~4。
 
-可视化窗口里有两行可以对照：
+注意：窗口里的 `algorithm rate` 是发布侧实测值，不会因为可视化渲染慢而下降；想确认算法没变慢就看它，想确认画面实时性就看 `frame rate`。
 
-- `frame rate`（绿色）：本进程每秒实际渲染的帧数；
-- `data rate`（黄色）：按 `frame_id` 增量统计算法侧的真实发布速率，不受渲染丢帧影响，**和日志里的 pipeline FPS 基本一致**。
-
-想提高渲染帧率：把不看的窗口关掉（`visualizer.draw.rmm`、`visualizer.draw.common_debug_oscilloscope` 等设 `false`），并在本地有线显示上跑。
+想提高 `frame rate`：把不看的窗口关掉（`visualizer.draw.rmm`、`visualizer.draw.common_debug_oscilloscope` 等设 `false`），并在本地有线显示上跑。
 
 ## 5. 日志怎么看
 
