@@ -49,7 +49,9 @@ struct SerialData {
 class SerialCommunicationClass {
 public:
     // 去掉 ROS2：原来 node 只用于打日志，改用 tools::logger()
-    SerialCommunicationClass(std::function<void(const SerialData&)> serialDataCallback);
+    // port_override 非空时强制使用指定串口（config serial_port），否则自动检测
+    SerialCommunicationClass(std::function<void(const SerialData&)> serialDataCallback,
+                             const std::string& port_override = "");
     ~SerialCommunicationClass();
     void stop();   // 停止通信线程（running=false），避免析构时手动调 ~ 造成双重析构
     void timerCallback();
@@ -66,6 +68,7 @@ private:
     // static constexpr size_t MAX_QUEUE_SIZE = 1;
 
     int fd_;
+    std::string port_override_;
     std::array<uint8_t, BUFFER_SIZE> buffer_;
     size_t buffer_index_ = 0;
     // std::atomic<int> received_commands_count_{0};

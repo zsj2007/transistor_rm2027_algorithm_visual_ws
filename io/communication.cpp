@@ -18,8 +18,11 @@ Communication::Communication(const std::string & config_path)
   if (yaml["use_head_imu"]) use_head_imu_ = yaml["use_head_imu"].as<bool>();
 
   // 原节点接线：串口 + HeadIMU 各自开一个 timer 线程
+  std::string serial_port;
+  if (yaml["serial_port"]) serial_port = yaml["serial_port"].as<std::string>();
   serial_ = std::make_shared<SerialCommunicationClass>(
-    std::bind(&Communication::serial_data_callback, this, std::placeholders::_1));
+    std::bind(&Communication::serial_data_callback, this, std::placeholders::_1),
+    serial_port);
   head_imu_ = std::make_shared<HeadIMUSerialCommunicationClass>(
     std::bind(&Communication::head_imu_data_callback, this, std::placeholders::_1));
 

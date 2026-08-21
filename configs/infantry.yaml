@@ -31,6 +31,7 @@ RP24_YOLO_infer_streams : 1 # 并发推理请求数（本机 4 个物理 P 核�
 # torque 通道由 ~/TorqueController 的 RobotController 接管 MCU/IMU 串口、融合与 100Hz 发送，
 # 此时不再使用旧的 io::Communication 串口，传感器状态改由 TorqueController 融合结果提供。
 command_channel : "serial"
+serial_port : "" # 电控主串口，如 "/dev/ttyACM1"；留空 = 自动检测（跳过产品名含 IMU 的口）
 
 # TorqueController 参数（command_channel=torque 时使用，默认值与 ~/TorqueController/src/control_demo.cpp 一致）
 torque_controller:

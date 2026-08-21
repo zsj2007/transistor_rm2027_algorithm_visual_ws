@@ -3,6 +3,9 @@
 
 #include "tools/logger.hpp"
 
+#include <cctype>
+#include <cstring>
+
 std::string SerialCommunicationClass::getSerialProductInfo(const std::string& port) {
     struct udev *udev;
     struct udev_device *dev;
@@ -39,8 +42,9 @@ std::string SerialCommunicationClass::getSerialProductInfo(const std::string& po
     return result;
 }
 
-SerialCommunicationClass::SerialCommunicationClass(std::function<void(const SerialData&)> serialDataCallback) 
-: serialDataCallback(serialDataCallback), fd_(-1) {
+SerialCommunicationClass::SerialCommunicationClass(std::function<void(const SerialData&)> serialDataCallback,
+                                                   const std::string& port_override)
+: serialDataCallback(serialDataCallback), fd_(-1), port_override_(port_override) {
     initializeSerial();
     last_reconnect_time = std::chrono::steady_clock::now();
     last_received_time = std::chrono::steady_clock::now();
@@ -77,14 +81,26 @@ void SerialCommunicationClass::initializeSerial() {
         return;
     }
     std::string port;
-    for (auto test_port : ports) {
-        try {
-            if(getSerialProductInfo(test_port.substr(5)) != std::string("STM32 Virtual ComPort MyIMU")) {
-                port = test_port;
-                break;
-            };
-        } catch (...) {
-
+    if (!port_override_.empty()) {
+        // 配置里显式指定了电控主串口，直接用
+        port = port_override_;
+    } else {
+        for (auto test_port : ports) {
+            try {
+                std::string product = getSerialProductInfo(test_port.substr(5));
+                // 跳过任何产品名含 IMU 的串口（老 IMU: "STM32 Virtual ComPort MyIMU"，
+                // 新 IMU: "AutoAim_IMU_Com"），避免把 IMU 口误当成电控主串口
+                std::string lower;
+                lower.reserve(product.size());
+                for (char c : product) {
+                    lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                if (lower.find("imu") == std::string::npos) {
+                    port = test_port;
+                    break;
+                }
+            } catch (...) {
+            }
         }
     }
     if (port.empty()) {
