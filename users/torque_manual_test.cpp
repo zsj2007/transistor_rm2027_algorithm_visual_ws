@@ -112,24 +112,36 @@ int main(int argc, char * argv[])
     if (!std::getline(std::cin, line)) break;
     std::istringstream iss(line);
     std::string tok;
-    while (iss >> tok) {
-      const char key = tok[0];
-      auto value = [&tok]() -> double {
-        const size_t eq = tok.find('=');
-        return std::stod(eq == std::string::npos ? tok.substr(1) : tok.substr(eq + 1));
-      };
-      switch (key) {
-        case 'y': target_yaw_deg = value(); break;
-        case 'p': target_pitch_deg = value(); break;
-        case 'f': fire = value() != 0.0; break;
-        case 'a': auto_aim_enable = value() != 0.0; break;
-        case 'm': yaw_torque_only_mode = value() != 0.0; break;
-        case 'i': integral_enable = value() != 0.0; break;
-        case 's': printState(rc.getState()); break;
-        case 'h': printHelp(); break;
-        case 'q': g_running = false; break;
-        default: std::printf("未知命令: %s (h 查看帮助)\n", tok.c_str());
+    try {
+      while (iss >> tok) {
+        const char key = tok[0];
+        // 支持 "p 1"（空格分开）和 "p=1" / "p1"（粘在一起）两种写法
+        auto value = [&iss, &tok]() -> double {
+          if (tok.size() > 1) {
+            const size_t eq = tok.find('=');
+            return std::stod(eq == std::string::npos ? tok.substr(1) : tok.substr(eq + 1));
+          }
+          std::string next;
+          if (!(iss >> next)) {
+            throw std::runtime_error("缺少数值");
+          }
+          return std::stod(next);
+        };
+        switch (key) {
+          case 'y': target_yaw_deg = value(); break;
+          case 'p': target_pitch_deg = value(); break;
+          case 'f': fire = value() != 0.0; break;
+          case 'a': auto_aim_enable = value() != 0.0; break;
+          case 'm': yaw_torque_only_mode = value() != 0.0; break;
+          case 'i': integral_enable = value() != 0.0; break;
+          case 's': printState(rc.getState()); break;
+          case 'h': printHelp(); break;
+          case 'q': g_running = false; break;
+          default: std::printf("未知命令: %s (h 查看帮助)\n", tok.c_str());
+        }
       }
+    } catch (const std::exception & e) {
+      std::printf("输入错误: %s（示例: y 30 / p -5 / f 1）\n", e.what());
     }
     rc.set(auto_aim_enable, yaw_torque_only_mode,
            target_yaw_deg * kDeg2Rad, target_pitch_deg * kDeg2Rad, fire, integral_enable);
