@@ -58,6 +58,8 @@ visualizer:
 frame_rate : 30.0 # fps
 serial_delay_time : 30.0 # ms 电控传来的信息相对相机画面快的时间，将对电控信息再延迟这个时间以同步两者
 serial_port : "" # 电控主串口，如 "/dev/ttyACM1"；留空 = 自动检测（跳过产品名含 IMU 的口）
+log_send_commands : true # 打开后每帧把实际下发的 pitch/yaw/fire 打到控制台，便于核对下位机收到的内容
+no_target_hold_position : false # 无目标时：false=回 0 位（原行为），true=保持最后位置不动
 extra_predict_time : 0.170 # s 除了弹丸飞行时间以外的需要预测器补偿的总时间
 
 # 自瞄流水线耗时统计

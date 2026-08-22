@@ -57,6 +57,11 @@ void Communication::send(float pitch, float yaw, bool fire)
   last_mcu_command_yaw_ = yaw;
 }
 
+void Communication::setLogSendCommands(bool enable)
+{
+  if (serial_) serial_->setLogSendCommands(enable);
+}
+
 void Communication::send(const Command & command)
 {
   send(command.pitch, command.yaw, command.fire);

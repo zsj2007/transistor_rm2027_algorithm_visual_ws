@@ -93,6 +93,9 @@ private:
   TorqueGimbalSender * torque_ = nullptr;          // 仅 torque 通道非空（由 sender_ 持有）
 #endif
   std::string channel_name_;
+  bool log_send_commands_ = false;                 // 每帧把实际下发命令打到控制台（本地视频调试/实车排障用）
+  bool cmd_initialized_ = false;                   // 首帧不下发前无“上一帧”可比
+  GimbalCommand last_sent_cmd_;                    // 上一帧命令，用于突变告警
 };
 
 }  // namespace io

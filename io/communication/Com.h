@@ -57,6 +57,9 @@ public:
     void timerCallback();
     bool sendData(float pitch_target, float yaw_target, bool fire = true);
     void timerThread();
+
+    // 打开后每帧把实际下发的 TX 帧写入 debug 日志（logs/*.log），便于本地/实车排障
+    void setLogSendCommands(bool enable) { log_send_commands_ = enable; }
     
 private:
     static constexpr size_t BUFFER_SIZE = 1024;
@@ -76,6 +79,7 @@ private:
 
     std::function<void(const SerialData&)> serialDataCallback;
     bool running = true;
+    bool log_send_commands_ = false;
 
     std::chrono::steady_clock::time_point last_reconnect_time;
     std::chrono::steady_clock::time_point last_received_time;

@@ -41,8 +41,6 @@ void SerialGimbalSender::send(const GimbalCommand & cmd)
 struct TorqueGimbalSender::Impl
 {
   std::unique_ptr<RobotController> rc;
-  bool yaw_torque_only_mode_ = false;
-  bool integral_enable_ = false;
   float default_bullet_velocity_ = 15.0f;
   std::string default_enemy_color_ = "BLUE";
 };
@@ -68,10 +66,6 @@ TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
   const double integral_gain = tc["integral_gain"] ? tc["integral_gain"].as<double>() : 0.01;
   const bool sequence_mode = tc["sequence_mode"] ? tc["sequence_mode"].as<bool>() : false;
 
-  impl_->yaw_torque_only_mode_ =
-    tc["yaw_torque_only_mode"] ? tc["yaw_torque_only_mode"].as<bool>() : false;
-  impl_->integral_enable_ =
-    tc["integral_enable"] ? tc["integral_enable"].as<bool>() : false;
   if (yaml["bullet_velocity_"]) {
     impl_->default_bullet_velocity_ = yaml["bullet_velocity_"].as<float>();
   }
@@ -125,20 +119,23 @@ io::State TorqueGimbalSender::state() const
   io::State st;
   auto s = impl_->rc->getState();
 
+  // 全走 strict 严格反解包：始终有效，缺失数据以 0 参与，不做 valid 分支
+  st.pitch_rad = s.strict.imu_euler_pitch;
+  st.total_yaw_rad = s.fused.imu_yaw_unwrapped;
+  st.yaw_rad = std::remainder(st.total_yaw_rad, kTwoPi);  // wrap 到 (-pi, pi]
+  st.roll_rad = s.strict.imu_euler_roll;
+
+  // strict 包里不含弹速/颜色：有 MCU 数据用实时值，否则回默认兜底
   if (s.mcu.valid) {
     st.bullet_velocity = s.mcu.bullet_velocity;
-    st.pitch_rad = s.mcu.pitch_angle;
-    st.total_yaw_rad = s.fused.valid ? s.fused.yaw_pos : s.mcu.yaw_angle;
-    st.yaw_rad = std::remainder(st.total_yaw_rad, kTwoPi);  // wrap 到 (-pi, pi]
     st.enemy_color = (s.mcu.color == 1) ? "BLUE" : "RED";
   } else {
     st.bullet_velocity = impl_->default_bullet_velocity_;
     st.enemy_color = impl_->default_enemy_color_;
   }
 
-  st.roll_rad = s.imu.valid ? s.imu.euler_roll : 0.0;
   st.use_head_imu = false;          // 融合由 TorqueController 内部完成
-  st.mcu_yaw_online = s.mcu.valid;  // 首包到达前视为离线
+  st.mcu_yaw_online = true;  // 首包到达前视为离线
   st.to_mcu_delta_yaw = 0.0;
   st.to_mcu_delta_pitch = 0.0;
   return st;
@@ -151,9 +148,13 @@ GimbalIo::GimbalIo(const std::string & config_path)
 {
   auto yaml = tools::load(config_path);
   channel_name_ = yaml["command_channel"] ? yaml["command_channel"].as<std::string>() : "serial";
+  if (yaml["log_send_commands"]) {
+    log_send_commands_ = yaml["log_send_commands"].as<bool>();
+  }
 
   if (channel_name_ == "serial") {
     comm_ = std::make_unique<io::Communication>(config_path);
+    comm_->setLogSendCommands(log_send_commands_);
     sender_ = std::make_unique<SerialGimbalSender>(*comm_);
   } else if (channel_name_ == "torque") {
 #if IO_ENABLE_TORQUE_CONTROLLER
@@ -192,6 +193,34 @@ io::State GimbalIo::stateAt(std::chrono::steady_clock::time_point t)
 void GimbalIo::send(const GimbalCommand & cmd)
 {
   sender_->send(cmd);
+
+  if (!log_send_commands_) return;
+
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kJumpAlertDeg = 10.0;  // 相邻两帧命令角跳变超过该值即告警（本地抓“剧烈扭转”用）
+
+  const double yaw_deg = cmd.yaw * 180.0 / kPi;
+  const double pitch_deg = cmd.pitch * 180.0 / kPi;
+
+  if (cmd_initialized_) {
+    const double dyaw_deg =
+      std::remainder(cmd.yaw - last_sent_cmd_.yaw, 2.0 * kPi) * 180.0 / kPi;
+    const double dpitch_deg = (cmd.pitch - last_sent_cmd_.pitch) * 180.0 / kPi;
+    if (std::fabs(dyaw_deg) > kJumpAlertDeg || std::fabs(dpitch_deg) > kJumpAlertDeg) {
+      tools::logger()->warn(
+        "[SEND-JUMP] yaw {:+.2f}° -> {:+.2f}° (Δ{:+.2f}°) | pitch {:+.2f}° -> {:+.2f}° (Δ{:+.2f}°)",
+        last_sent_cmd_.yaw * 180.0 / kPi, yaw_deg, dyaw_deg,
+        last_sent_cmd_.pitch * 180.0 / kPi, pitch_deg, dpitch_deg);
+    }
+  }
+  last_sent_cmd_ = cmd;
+  cmd_initialized_ = true;
+
+  // info 级：每帧把实际下发的指令打到控制台（log_send_commands 打开时），同时也会写入日志文件
+  tools::logger()->info(
+    "[SEND] {} | pitch {:+.2f}° yaw {:+.2f}° fire={} auto_aim_enable={}",
+    channel_name_, pitch_deg, yaw_deg,
+    static_cast<int>(cmd.fire), static_cast<int>(cmd.auto_aim_enable));
 }
 
 void GimbalIo::recalibrateHeadImu()

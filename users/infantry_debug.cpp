@@ -52,6 +52,20 @@ int main(int argc, char * argv[])
     cpu_pinned ? "ENABLED" : "DISABLED",
     tools::cpu_affinity::currentCpusAllowedList());
 
+  // 无目标（reset）时的云台行为：false=回 0 位（原行为）；true=保持最后位置不动
+  bool no_target_hold_position = yaml["no_target_hold_position"]
+                                   ? yaml["no_target_hold_position"].as<bool>()
+                                   : false;
+
+  // torque 通道专用：仅力矩模式 / yaw 力矩积分补偿（serial 通道忽略），默认 false
+  bool torque_yaw_torque_only_mode = false;
+  bool torque_integral_enable = false;
+  if (yaml["torque_controller"]) {
+    const YAML::Node & tc = yaml["torque_controller"];
+    if (tc["yaw_torque_only_mode"]) torque_yaw_torque_only_mode = tc["yaw_torque_only_mode"].as<bool>();
+    if (tc["integral_enable"]) torque_integral_enable = tc["integral_enable"].as<bool>();
+  }
+
   tools::Exiter exiter;
 
   // ---- io：硬件抽象层（构造即初始化）----
@@ -95,6 +109,8 @@ int main(int argc, char * argv[])
   cv::Mat img;
   std::chrono::steady_clock::time_point t;
   bool last_auto_aim_switch = true;
+  float last_send_pitch = 0.0f;
+  double last_send_yaw = 0.0;
   double frame_rate = yaml["frame_rate"] ? yaml["frame_rate"].as<double>() : 80.0;
 
   while (!exiter.exit()) {
@@ -143,13 +159,22 @@ int main(int argc, char * argv[])
       result_fps.tick();  // 流水线完成一帧（有效结果）
 
       io::GimbalCommand cmd;
+      cmd.yaw_torque_only_mode = torque_yaw_torque_only_mode;
+      cmd.integral_enable = torque_integral_enable;
       if (result.valid_data.should_send_reset) {
         cmd.auto_aim_enable = false;
+        if (no_target_hold_position) {
+          // 保持模式：不回到 0，继续下发最后一次瞄准角度（fire 保持 false）
+          cmd.pitch = last_send_pitch;
+          cmd.yaw = last_send_yaw;
+        }
       } else {
         cmd.auto_aim_enable = true;
         cmd.pitch = result.valid_data.mcu_command_pitch;
         cmd.yaw = result.valid_data.mcu_command_yaw;
         cmd.fire = result.valid_data.predictor_result.fire_flag;
+        last_send_pitch = cmd.pitch;
+        last_send_yaw = cmd.yaw;
       }
       gimbal.send(cmd);
       watchdog.feed_if_needed();

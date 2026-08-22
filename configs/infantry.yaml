@@ -30,8 +30,10 @@ RP24_YOLO_infer_streams : 1 # 并发推理请求数（本机 4 个物理 P 核�
 # 下发通道：serial（原串口角度协议 0x42 0x52 0xCD）| torque（TorqueController MPC 力矩协议）
 # torque 通道由 ~/TorqueController 的 RobotController 接管 MCU/IMU 串口、融合与 100Hz 发送，
 # 此时不再使用旧的 io::Communication 串口，传感器状态改由 TorqueController 融合结果提供。
-command_channel : "serial"
+command_channel : "torque"
 serial_port : "" # 电控主串口，如 "/dev/ttyACM1"；留空 = 自动检测（跳过产品名含 IMU 的口）
+log_send_commands : true # true 时每帧把实际下发的 pitch/yaw/fire 打到控制台（实车排障可临时打开）
+no_target_hold_position : true # 无目标时：false=回 0 位（原行为），true=保持最后位置不动
 
 # TorqueController 参数（command_channel=torque 时使用，默认值与 ~/TorqueController/src/control_demo.cpp 一致）
 torque_controller:
@@ -61,8 +63,8 @@ torque_controller:
 init_enemy_color : "BLUE" # 初始敌方颜色，连接至电控后会自动获取敌方颜色并覆盖此值
 max_armor_position_height : 1500.0 # 最大装甲板高度，超过此值视为无效
 
-camera_ExposureTime : 5000.0
-camera_Gain : 16.0
+camera_ExposureTime : 100000.0 # 临时诊断：夜晚环境光暗，先拉高曝光验证画面能否变亮；帧率会降到 ~10fps
+camera_Gain : 23.0 # 本相机增益范围 0~23.98，超过上限会导致连接失败
 bullet_velocity_ : 15.0 # 初始弹速，连接至电控后会自动获取实时弹速并覆盖此值
 # 相机光心相对枪口的偏移（xyz分别为相机系下向右、向前、向上）
 delta_x_ : 50.0
@@ -110,7 +112,7 @@ cpu_pinning:
   yolo_enable_hyper_threading: true
 
 pre_predict_time_not_aim : 500.0 # ms 在看到目标的这段时间内不启动自瞄
-pre_predict_time : 2000.0 # ms 在看到目标的这段时间内直接瞄准当前装甲板位置，待有足够观测值后再使用预测值
+pre_predict_time : 200000000.0 # ms 在看到目标的这段时间内直接瞄准当前装甲板位置，待有足够观测值后再使用预测值
 reset_predictor_time : 1000.0 # ms 超过这段时间未观测到某一类装甲板，将停止这一类装甲板的预测并重置预测器
 
 # 控制PID参数
@@ -119,10 +121,10 @@ pitch_integration_min_degree : -20.0
 yaw_integration_max_degree : 20.0
 yaw_integration_min_degree : -20.0
 command_picth_kp: 1.0
-command_picth_integration_speed: 0.1
+command_picth_integration_speed: 0.0
 command_picth_integration_max_speed_degree: 5.0
 command_yaw_kp: 1.0
-command_yaw_integration_speed: 0.01
+command_yaw_integration_speed: 0.00
 command_yaw_integration_max_speed_degree: 5.0
 
 # 火控设置
@@ -185,7 +187,7 @@ CLASSIFY_THRESHOLD : 0.5
 INPUT_HEIGHT : 48
 INPUT_WIDTH : 64
 MAX_TRACKING_AGE_MS : 100 # 最大跟踪时间100ms
-MIN_TRACKING_COUNT : 2 # 最小连续跟踪次数
+MIN_TRACKING_COUNT : 1 # 临时测试：相机帧率低+检出断帧，原值2导致追踪器永远确认不了目标；验证后调回2
 IS_NEAR_MAX_DIST_RATIO : 1.5
 armor_tracker_fit_step : 5
 armor_tracker_predict_step : 5

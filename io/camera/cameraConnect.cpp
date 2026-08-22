@@ -467,14 +467,14 @@ bool Camera::initCameraParams() {
     nRet = MV_CC_SetFloatValue(handle, "ExposureTime", exposureTime);
     if (MV_OK != nRet) {
         std::cerr << "Set ExposureTime fail! nRet [0x" << std::hex << nRet << "]" << std::endl;
-        return false;
+        // 参数设置失败不阻断连接：相机继续用当前值，避免单个配置值超范围导致相机永远连不上
     }
     
     // 设置默认增益值 (16.0)
     nRet = MV_CC_SetFloatValue(handle, "Gain", gain);
     if (MV_OK != nRet) {
         std::cerr << "Set Gain fail! nRet [0x" << std::hex << nRet << "]" << std::endl;
-        return false;
+        // 同上：警告后继续连接
     }
     
     return true;
@@ -491,21 +491,21 @@ bool Camera::initCameraCommonParams() {
     nRet = MV_CC_SetEnumValue(handle, "ExposureAuto", 0);
     if (MV_OK != nRet) {
         std::cerr << "Disable auto exposure fail! nRet [0x" << std::hex << nRet << "]" << std::endl;
-        return false;
+        // 失败不阻断连接
     }
     
     // 禁用自动增益
     nRet = MV_CC_SetEnumValue(handle, "GainAuto", 0);
     if (MV_OK != nRet) {
         std::cerr << "Disable auto gain fail! nRet [0x" << std::hex << nRet << "]" << std::endl;
-        return false;
+        // 失败不阻断连接
     }
     
     // 禁用自动白平衡
     nRet = MV_CC_SetEnumValue(handle, "BalanceWhiteAuto", 0);
     if (MV_OK != nRet) {
         std::cerr << "Disable auto white balance fail! nRet [0x" << std::hex << nRet << "]" << std::endl;
-        return false;
+        // 失败不阻断连接
     }
     
     // 设置相机参数
@@ -619,4 +619,3 @@ std::vector<std::string> Camera::enumUSBDevices() {
     
     return deviceList;
 }
-

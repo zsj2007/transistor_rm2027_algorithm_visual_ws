@@ -54,6 +54,9 @@ public:
   void send(const Command & command);
   void send(float pitch, float yaw, bool fire);
 
+  // 打开后每帧把实际下发的指令写入 debug 日志（由 GimbalIo 按 log_send_commands 配置透传）
+  void setLogSendCommands(bool enable);
+
   // 开启自瞄时校准 HeadIMU（原 recalibrateHeadIMU）
   void recalibrate_head_imu();
 

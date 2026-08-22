@@ -182,53 +182,58 @@ std::vector<std::string> SerialCommunicationClass::findAvailableSerialPorts() {
 }
 
 bool SerialCommunicationClass::sendData(float pitch_target, float yaw_target, bool fire) {
-    if (fd_ >= 0) {
-        //pitch_target = -0.01; // 约 0.01对应30°
-        //yaw_target = 0;
-        // 传入参数使用弧度制 [-M_PI, M_PI]
-        // 总大小 = 帧头(2) + 命令码(1) + 长度(1) + pitch_target(4) + yaw_target(2) + fire(1) + CRC(1) = 12字节
-        std::array<uint8_t, 12> tx_data{};
-        
-        tx_data[0] = FRAME_HEADER1;
-        tx_data[1] = FRAME_HEADER2;
-        tx_data[2] = COMMAND_CODE;
-        tx_data[3] = 0x07;  // 数据长度为7（4字节pitch_target + 2字节yaw_target + 1字节fire）
-        
-        // 处理pitch_target (4字节)
-        pitch_target = pitch_target *180/M_PI * 0.01/30;
-        memcpy(&tx_data[4], &pitch_target, sizeof(float));  // 4字节float
-        
-        // 处理yaw_target (2字节)
-        int16_t yaw_int16 = static_cast<int16_t>(yaw_target * 4096 / M_PI);  // 将float转换为定点数
-        while (yaw_int16 > 4095) {
-            yaw_int16 -= 8192;
-        }
-        while (yaw_int16 < -4096) {
-            yaw_int16 += 8192;
-        }
+    // 传入参数使用弧度制 [-M_PI, M_PI]
+    const float pitch_rad = pitch_target;
+    const float yaw_rad = yaw_target;
 
-        //yaw_int16 = 1234;
+    // 总大小 = 帧头(2) + 命令码(1) + 长度(1) + pitch_target(4) + yaw_target(2) + fire(1) + CRC(1) = 12字节
+    std::array<uint8_t, 12> tx_data{};
 
-        memcpy(&tx_data[8], &yaw_int16, sizeof(int16_t));  // 2字节
+    tx_data[0] = FRAME_HEADER1;
+    tx_data[1] = FRAME_HEADER2;
+    tx_data[2] = COMMAND_CODE;
+    tx_data[3] = 0x07;  // 数据长度为7（4字节pitch_target + 2字节yaw_target + 1字节fire）
 
-        // 处理fire
-        if (fire) {
-            tx_data[10] = 0x01;
-        } else {
-            tx_data[10] = 0x00;
-        }
-        
-        // 计算并添加CRC
-        tx_data[11] = CRC8_Check_Sum(tx_data.data(), 11);
+    // 处理pitch_target (4字节)：弧度 -> 度 -> 协议值（30° 对应 0.01）
+    const float pitch_proto = pitch_rad * 180.0f / M_PI * 0.01f / 30.0f;
+    memcpy(&tx_data[4], &pitch_proto, sizeof(float));  // 4字节float
 
-        ssize_t written = write(fd_, tx_data.data(), tx_data.size());
-        if (written == static_cast<ssize_t>(tx_data.size())) {
-            tools::logger()->debug(
-                "TX: pitch_target={:.2f} yaw_target={:.2f}(int16={})", pitch_target, yaw_target, yaw_int16);
-            return true;
-        } else {
-            tools::logger()->debug("TX write failed: written {} bytes", written);
-        }
+    // 处理yaw_target (2字节)：弧度 -> int16 定点（4096 = π rad）
+    int16_t yaw_int16 = static_cast<int16_t>(yaw_rad * 4096 / M_PI);  // 将float转换为定点数
+    while (yaw_int16 > 4095) {
+        yaw_int16 -= 8192;
+    }
+    while (yaw_int16 < -4096) {
+        yaw_int16 += 8192;
+    }
+
+    memcpy(&tx_data[8], &yaw_int16, sizeof(int16_t));  // 2字节
+
+    // 处理fire
+    tx_data[10] = fire ? 0x01 : 0x00;
+
+    // 计算并添加CRC
+    tx_data[11] = CRC8_Check_Sum(tx_data.data(), 11);
+
+    // log_send_commands 打开时：无论串口是否可用，都把实际会下发的帧写入 debug 日志
+    if (log_send_commands_) {
+        tools::logger()->debug(
+            "TX: pitch={:.3f} rad ({:+.3f}°, proto={:.6f}) yaw={:.3f} rad ({:+.3f}°, int16={}) fire={} "
+            "frame={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+            pitch_rad, pitch_rad * 180.0f / M_PI, pitch_proto,
+            yaw_rad, yaw_rad * 180.0f / M_PI, yaw_int16, static_cast<int>(fire),
+            tx_data[0], tx_data[1], tx_data[2], tx_data[3],
+            tx_data[4], tx_data[5], tx_data[6], tx_data[7],
+            tx_data[8], tx_data[9], tx_data[10], tx_data[11]);
+    }
+
+    if (fd_ < 0) return false;
+
+    ssize_t written = write(fd_, tx_data.data(), tx_data.size());
+    if (written == static_cast<ssize_t>(tx_data.size())) {
+        return true;
+    } else {
+        tools::logger()->debug("TX write failed: written {} bytes", written);
     }
     return false;
 }
