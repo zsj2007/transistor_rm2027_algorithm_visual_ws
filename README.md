@@ -7,6 +7,9 @@
 ## 快速开始（Ubuntu 22.04 x86_64）
 
 ```bash
+# 0. 一键安装/验证依赖并编译（推荐；等效于下面的 1+2）
+./setup.sh
+
 # 1. 安装依赖（详见下文）
 # 2. 编译
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

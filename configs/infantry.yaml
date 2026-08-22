@@ -63,7 +63,7 @@ torque_controller:
 init_enemy_color : "BLUE" # 初始敌方颜色，连接至电控后会自动获取敌方颜色并覆盖此值
 max_armor_position_height : 1500.0 # 最大装甲板高度，超过此值视为无效
 
-camera_ExposureTime : 100000.0 # 临时诊断：夜晚环境光暗，先拉高曝光验证画面能否变亮；帧率会降到 ~10fps
+camera_ExposureTime : 2000.0 # 临时诊断：夜晚环境光暗，先拉高曝光验证画面能否变亮；帧率会降到 ~10fps
 camera_Gain : 23.0 # 本相机增益范围 0~23.98，超过上限会导致连接失败
 bullet_velocity_ : 15.0 # 初始弹速，连接至电控后会自动获取实时弹速并覆盖此值
 # 相机光心相对枪口的偏移（xyz分别为相机系下向右、向前、向上）
