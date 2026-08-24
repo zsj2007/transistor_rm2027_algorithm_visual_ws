@@ -1,8 +1,14 @@
 # transistor_rm2027_algorithm_visual_ws
 
-2027 赛季步兵自瞄算法仓库：无 ROS2，纯 C++17 / CMake。架构沿用 `sp_vision_25` 的壳 + `transistor_rm2026` 的算法芯，调试可视化通过**共享内存**（System V SHM + POSIX 信号量）在算法进程和独立可视化进程之间传输，替代 2026 仓库里基于 ROS 话题的 `auto_aim_visualizer`。
+2027 赛季步兵自瞄算法仓库：无 ROS2，纯 C++17 / CMake。，调试可视化通过**共享内存**（System V SHM + POSIX 信号量）在算法进程和独立可视化进程之间传输，替代 2026 仓库里基于 ROS 话题的 `auto_aim_visualizer`。
 
-详细设计见 [MODULES.md](MODULES.md)，搬运清单见 [PORTING.md](PORTING.md)，实车部署细节见 [DEPLOY.md](DEPLOY.md)。
+当前主线是**新架构 + 新预测器**：
+
+- **新架构**：帧输入统一走 `FramePacket`（像素 + 源帧时间戳 `source_timestamp_s` + `frame_id`），流水线四段异步化，预测器按源帧时间推进；
+- **新预测器**：`TargetManager`（持久目标生命周期管理）+ `SuperPowerEKF`（基于 EKF 的旋转目标预测），RMM 已从构建中移除；
+- **绑核**：每台机器的 CPU 拓扑不同，必须按第 3.4 节自己配置，禁止照抄。
+
+
 
 ## 快速开始（Ubuntu 22.04 x86_64）
 
@@ -27,13 +33,39 @@ cmake --build build -j$(nproc)
 ```
 configs/   每台机器人的 YAML 配置（infantry.yaml 实车 / infantry_video.yaml 视频回放）
 assets/    运行资源：YOLO 模型（已入库）、测试视频（已入库）
-io/        硬件抽象层：相机/串口/看门狗/共享内存（含可视化共享内存桥）
-tasks/     算法功能层：检测/跟踪/分类/解算/预测/火控/Stage4 可视化
+io/        硬件抽象层：相机/串口/看门狗/共享内存；帧输入统一发布到 FramePacket（像素+源时间戳+帧号）
+tasks/     算法功能层：检测(YOLO)/跟踪/分类/解算/预测/火控/Stage4 可视化
+  auto_aim/EKF/         SuperPower EKF 预测系统（SuperPowerEKF/Target/Tracker/Predictor）
+  auto_aim/predictor/   TargetManager + AllPredictor/PredictorMain（新 step 接口）
 tools/     通用工具：日志（spdlog）、数学、CPU 绑核等
 users/     应用层：infantry、infantry_debug、visualizer 三个可执行文件
+scripts/   运维脚本：cpu_topology.sh（识别每台机器 P/E 核并给出绑核建议）
 ```
 
 数据流：`io::Camera → io::GimbalIo(state) → AutoAimPipeline（4 段流水线）→ io::GimbalIo.send() → io::Watchdog`，可视化数据在流水线 Stage4 写入共享内存。
+
+## 架构与数据流（当前状态）
+
+四段流水线：`Stage1 检测(YOLO) → Stage2 3D解算 → Stage3 预测/火控 → Stage4 可视化/日志`。
+
+**1. 帧时间戳（新架构核心）**
+
+相机 / 视频 / 图片输入统一把每帧发布到全局 `FramePacket`（`image` + `timestamp_s` + `frame_id`），`read()` 在同一个临界区里取齐像素和时间，不再出现“取帧前打时间戳导致时间错配”。流水线的 `InitialData.source_timestamp_s` 会传给 `PredictorMain::step`，EKF 用它算 `dt`——**视频回放时即使流水线跑得比实时快，dt 仍按源帧率推进**，预测行为与实车一致。
+
+**2. 新预测器（SuperPower EKF）**
+
+`PredictorMain::step` 的旧签名（`predictor_type` 自动切换）已改为传 `source_timestamp_s`，内部走：
+
+- `TargetManager`：维护持久物理目标的完整生命周期（`DETECTING / TRACKING / TEMP_LOST / LOST / SWITCHING`），配置段 `target_manager:`（`min_detect_frames`、`max_temp_lost_frames`、`outpost_max_temp_lost_frames`、`enable_priority_switch`）；
+- `SuperPowerEKF`：EKF 状态估计 + 旋转目标预测（适配四装甲板），配置段 `superpower_ekf:`（`min_detect_count`、`max_temp_lost_count`、`max_dt_s`、`initial_radius_m`、`armor_num`）。
+
+注意：`RotationMotionModel` 已从构建中移除，不再参与预测。visualizer 增加了 `SuperPowerEKF` 预测器类型和目标状态面板。
+
+**3. 性能相关配置**
+
+- 每台机器先跑 `./scripts/cpu_topology.sh` 识别 P/E 核，按第 3.4 节配置 `cpu_pinning`；
+- `frame_rate` 应 ≤ 流水线处理能力，`in_q` 稳定 0~1 为健康（见第 4 节）；
+- 推理慢/掉帧优先查：绑核是否生效、是否插电、`yolo_infer` 是否热降频。
 
 ## 1. 依赖安装
 
@@ -192,6 +224,22 @@ cmake --build build -j$(nproc)
    各字段含义：`other_cores` = 主线程/流水线等非推理线程的核；`yolo_core_type` = 推理线程限定 pcore/ecore/any；`yolo_enable_hyper_threading` = 是否用超线程逻辑核；`yolo_cores` + `yolo_pool_threads` = 给 YOLO 预处理/后处理单独建线程池（建议放 E 核，别和推理抢 P 核）。
 
    笔记本上跑满 3 分钟后 `yolo_infer` 如果从低值缓慢爬升，通常是热/功耗降频：先确认插电 + `sudo powerprofilesctl set performance`，再考虑换 `ecore` 或降低 `frame_rate` 匹配处理能力（`in_q` 稳定 0~1 为健康）。
+
+**操作步骤速查（每台新机器都做一遍）：**
+
+```bash
+# 1. 识别本机拓扑，抄建议值
+./scripts/cpu_topology.sh
+
+# 2. 填进 configs/*.yaml 的 cpu_pinning: 段
+#    enabled: false + yolo_core_type: "pcore" + yolo_enable_cpu_pinning: true
+#    RP24_YOLO_infer_threads = 物理 P 核数（开 HT 可试 ×2）
+
+# 3. 启动后核对生效 + 跑满 3 分钟验收
+./build/infantry_debug configs/infantry_video.yaml
+#    看启动日志 main thread allowed cpus（应为全核）与 yolo pool 行
+#    看 [FPS] pipeline 是否稳定、in_q 是否 0~1、yolo_infer 是否不爬升
+```
 
 ## 4. frame rate / algorithm rate / 日志 FPS 到底是什么
 

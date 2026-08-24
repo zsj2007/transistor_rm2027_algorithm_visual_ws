@@ -42,7 +42,7 @@ delta_z_ : 30.0
 pc_ip : "192.168.10.25"
 cam_ip : "192.168.10.10"
 
-video_relative_path : "assets/InputVideo/Video_20260819095627436.avi" # 使用视频输入时的视频路径
+video_relative_path : "assets/InputVideo/infantry_blue.mp4" # 使用视频输入时的视频路径
 images_relative_path : "assets/InputImages" # 使用图片输入时的图片文件夹路径
 
 RMM_visualize_zoom_out_factor : 10.0 # 平面可视化缩放系数，该值越大视野范围越大
@@ -116,8 +116,8 @@ command_yaw_integration_max_speed_degree: 5.0
 # 火控设置
 after_target_change_ceasefire_ms : 300
 before_target_change_ceasefire_ms : 100
-aim_center_vyaw_upper_threshold : 2.5
-aim_center_vyaw_lower_threshold : 2.0
+aim_center_vyaw_upper_threshold : 10.5
+aim_center_vyaw_lower_threshold : 6.0
 aim_center_yaw_bias_expand : 0.0
 low_vyaw_change_target_delta_yaw_threshold_degree : 30.0
 low_vyaw_threshold : 0.3

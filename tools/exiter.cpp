@@ -21,4 +21,6 @@ Exiter::Exiter()
 
 bool Exiter::exit() const { return exit_; }
 
+bool exitRequested() { return exit_; }
+
 }  // namespace tools

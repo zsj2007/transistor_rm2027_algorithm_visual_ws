@@ -71,7 +71,7 @@ void* VideoInput::workThread(void* pThis) {
         //cv::resize(frame, resized_frame, cv::Size(1280, 1024));
 
         // 线程锁定，更新全局图像
-        while (!image_used)
+        while (!image_used && !g_bExit)
         {
             usleep(1000);
         }

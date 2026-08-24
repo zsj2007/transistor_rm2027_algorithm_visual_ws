@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <unistd.h>  // usleep
 
+#include "tools/exiter.hpp"
 #include "tools/yaml.hpp"
 #include "other_input/FramePacket.h"
 
@@ -57,7 +58,7 @@ bool Camera::read(cv::Mat & img,
   // Wait first, then read image + source-time metadata in the same critical
   // section. The old code timestamped before waiting and could pair a frame
   // with the wrong time.
-  while (image_used && !g_bExit) {
+  while (image_used && !g_bExit && !tools::exitRequested()) {
     usleep(1000);
   }
 
