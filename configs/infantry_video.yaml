@@ -19,12 +19,12 @@ CLASSIFIER_SHM_KEY : 0x0250
 classifier_model_relative_path : "assets/models/model_rm2026_openvino/model.xml"
 
 use_RP24_YOLO : true # 改为 true 启用 YOLO 检测管线（当前为同济 yolov5）
-RP24_YOLO_model_relative_path : "assets/models/yolov5_tongji.xml" # 同济yolov5 IR
+RP24_YOLO_model_relative_path : "assets/models/RP24_YOLO/0526.xml" # RP24 0526 模型 IR（可选 0526_int8.xml）
 RP24_YOLO_device : "CPU"
-RP24_YOLO_model_family : "tongji_yolov5" # rp24 或 tongji_yolov5（同济模型颜色/类别语义不同）
-RP24_YOLO_letterbox : true # 同济模型训练时用 letterbox，需保持一致
+RP24_YOLO_model_family : "rp24" # rp24 或 tongji_yolov5（同济模型颜色/类别语义不同）
+RP24_YOLO_letterbox : false # 同济模型用 letterbox；rp24/0526 模型训练时是拉伸，需保持一致
 RP24_YOLO_input_size : 640 # 模型输入边长，必须与模型一致
-RP24_YOLO_infer_threads : 8 # 推理总线程数（基线：全核自由调度时 8 线程 ≈10.8ms）
+RP24_YOLO_infer_threads : 4 # 推理总线程数（基线：全核自由调度时 8 线程 ≈10.8ms）
 RP24_YOLO_infer_streams : 1 # 并发推理请求数（本机 4 个物理 P 核撑不起 2 流）
 
 # ArmorDetect_Node 参数
@@ -42,7 +42,7 @@ delta_z_ : 30.0
 pc_ip : "192.168.10.25"
 cam_ip : "192.168.10.10"
 
-video_relative_path : "assets/InputVideo/infantry_blue.mp4" # 使用视频输入时的视频路径
+video_relative_path : "assets/InputVideo/Video_20260819095627436.avi" # 使用视频输入时的视频路径
 images_relative_path : "assets/InputImages" # 使用图片输入时的图片文件夹路径
 
 RMM_visualize_zoom_out_factor : 10.0 # 平面可视化缩放系数，该值越大视野范围越大
@@ -55,7 +55,7 @@ visualizer:
   shm_key: 0x0251 # 可视化共享内存 key（与 visualizer 进程保持一致）
   log_video: false # 是否录制视频
 
-frame_rate : 30.0 # fps
+frame_rate : 50.0 # fps；输入应≤流水线处理能力，否则队列积压拉高端到端延迟
 serial_delay_time : 30.0 # ms 电控传来的信息相对相机画面快的时间，将对电控信息再延迟这个时间以同步两者
 serial_port : "" # 电控主串口，如 "/dev/ttyACM1"；留空 = 自动检测（跳过产品名含 IMU 的口）
 log_send_commands : true # 打开后每帧把实际下发的 pitch/yaw/fire 打到控制台，便于核对下位机收到的内容
@@ -67,7 +67,7 @@ performance_monitor_enabled : true
 performance_monitor_report_interval : 30 # 累计多少帧输出一次平均耗时
 
 # 线程池参数
-thread_pool_size : 0 # 全局线程池线程数，0=自动（逻辑核数）
+thread_pool_size : 6 # 全局线程池线程数，0=自动（逻辑核数）
 
 # ============ CPU 绑核配置（不同电脑需按实际拓扑调整） ============
 # 本机（Intel Core Ultra 5 125H）：4 个 P 核（逻辑 CPU 0-7，最高 4.5GHz，含超线程）
@@ -76,11 +76,11 @@ thread_pool_size : 0 # 全局线程池线程数，0=自动（逻辑核数）
 cpu_pinning:
   enabled: false             # 本机 4P+8E：P 核太少，绑核反而拖慢推理（36ms vs 10.8ms）
   other_cores: "8-15"              # 主线程/线程池/流水线/IO 等“其余线程”绑定的 E 核
-  yolo_cores: ""                   # 空 = 不用 YOLO 专用 P 核池
-  yolo_pool_threads: 0             # 0 = 不用 YOLO 专用池
-  yolo_core_type: "any"            # OpenVINO 不限定 P/E 核（any / pcore / ecore）
-  yolo_enable_cpu_pinning: false   # 不固定推理线程
-  yolo_enable_hyper_threading: true
+  yolo_cores: "0-7"                   # 空 = 不用 YOLO 专用 P 核池
+  yolo_pool_threads: 2         # 0 = 不用 YOLO 专用池
+  yolo_core_type: "pcore"            # OpenVINO 不限定 P/E 核（any / pcore / ecore）
+  yolo_enable_cpu_pinning: true   
+  yolo_enable_hyper_threading: false
 
 pre_predict_time_not_aim : 500.0 # ms 在看到目标的这段时间内不启动自瞄
 pre_predict_time : 2000.0 # ms 在看到目标的这段时间内直接瞄准当前装甲板位置，待有足够观测值后再使用预测值

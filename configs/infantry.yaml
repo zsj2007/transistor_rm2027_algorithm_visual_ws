@@ -19,10 +19,10 @@ CLASSIFIER_SHM_KEY : 0x0250
 classifier_model_relative_path : "assets/models/model_rm2026_openvino/model.xml"
 
 use_RP24_YOLO : true # 改为 true 启用 YOLO 检测管线（当前为同济 yolov5）
-RP24_YOLO_model_relative_path : "assets/models/yolov5_tongji.xml" # 同济yolov5 IR
+RP24_YOLO_model_relative_path : "assets/models/RP24_YOLO/0526.xml" # RP24 0526 模型 IR（可选 0526_int8.xml）
 RP24_YOLO_device : "CPU"
-RP24_YOLO_model_family : "tongji_yolov5" # rp24 或 tongji_yolov5（同济模型颜色/类别语义不同）
-RP24_YOLO_letterbox : true # 同济模型训练时用 letterbox，需保持一致
+RP24_YOLO_model_family : "rp24" # rp24 或 tongji_yolov5（同济模型颜色/类别语义不同）
+RP24_YOLO_letterbox : false # 同济模型用 letterbox；rp24/0526 模型训练时是拉伸，需保持一致
 RP24_YOLO_input_size : 640 # 模型输入边长，必须与模型一致
 RP24_YOLO_infer_threads : 8 # 推理总线程数（基线：全核自由调度时 8 线程 ≈10.8ms）
 RP24_YOLO_infer_streams : 1 # 并发推理请求数（本机 4 个物理 P 核撑不起 2 流）
@@ -87,7 +87,7 @@ visualizer:
   shm_key: 0x0251 # 可视化共享内存 key（与 visualizer 进程保持一致）
   log_video: true # 是否录制视频
 
-frame_rate : 80.0 # fps
+frame_rate : 45.0 # fps；输入应≤流水线处理能力，否则队列积压拉高端到端延迟（相机模式受链路帧率限制，此值仅作上限）
 serial_delay_time : 30.0 # ms 电控传来的信息相对相机画面快的时间，将对电控信息再延迟这个时间以同步两者
 extra_predict_time : 0.170 # s 除了弹丸飞行时间以外的需要预测器补偿的总时间
 
