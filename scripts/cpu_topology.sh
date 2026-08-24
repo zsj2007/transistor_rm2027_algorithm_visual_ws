@@ -25,8 +25,9 @@ echo "== 按频率分组 + 绑核建议 =="
 python3 - <<'PYEOF'
 import glob
 import re
+import collections
 
-groups = {}
+info = {}          # cpu -> (max_mhz, core_id)
 for p in glob.glob('/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq'):
     m = re.search(r'/cpu(\d+)/', p)
     if not m:
@@ -35,40 +36,51 @@ for p in glob.glob('/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq')
     raw = open(p).read().strip()
     if not raw:
         continue  # 偶发空文件直接跳过
-    mhz = int(raw) // 1000
-    groups.setdefault(mhz, []).append(cpu)
+    try:
+        core_id = open(f'/sys/devices/system/cpu/cpu{cpu}/topology/core_id').read().strip()
+    except OSError:
+        core_id = None
+    info[cpu] = (int(raw) // 1000, core_id)
 
-if not groups:
+if not info:
     raise SystemExit('未找到 CPU 频率信息')
 
-sorted_freq = sorted(groups, reverse=True)
-for i, mhz in enumerate(sorted_freq):
-    cpus = sorted(groups[mhz])
-    rng = f"{cpus[0]}-{cpus[-1]}" if len(cpus) > 1 else str(cpus[0])
-    if i == 0:
-        role = "P核(性能)"
-    elif len(sorted_freq) > 1 and i == 1:
-        role = "E核(能效)"
-    else:
-        role = "低功耗E核"
-    print(f"  {mhz} MHz  {len(cpus)} 核: {rng}  <- {role}")
+# 识别方法：Intel 混合架构上 P 核有超线程（同一物理核 2 个逻辑核），E 核没有。
+core_threads = collections.defaultdict(list)
+for cpu, (mhz, cid) in info.items():
+    if cid is not None:
+        core_threads[cid].append(cpu)
+ht_cores = {cid for cid, cpus in core_threads.items() if len(cpus) >= 2}
 
-if len(sorted_freq) >= 2:
-    p = sorted(groups[sorted_freq[0]])
-    e = sorted(groups[sorted_freq[1]])
-    # 物理 P 核数 = P 组里不同的 core_id 个数（去超线程重复）
-    phys_p = set()
-    for c in p:
-        try:
-            phys_p.add(open(f'/sys/devices/system/cpu/cpu{c}/topology/core_id').read().strip())
-        except OSError:
-            pass
+p_cpus = sorted(c for c, (m, cid) in info.items() if cid in ht_cores)
+e_cpus = sorted(c for c, (m, cid) in info.items() if cid is not None and cid not in ht_cores)
+
+def rng(cpus):
+    return f"{cpus[0]}-{cpus[-1]}" if len(cpus) > 1 else str(cpus[0])
+
+def freq_of(cpus):
+    return sorted({info[c][0] for c in cpus}, reverse=True)
+
+if e_cpus:
+    print(f"  P核(性能, 含超线程): {len(p_cpus)} 逻辑核 -> {rng(p_cpus)}  最大频率 {freq_of(p_cpus)} MHz")
+    print(f"  E核(能效, 无超线程): {len(e_cpus)} 逻辑核 -> {rng(e_cpus)}  最大频率 {freq_of(e_cpus)} MHz")
+    phys_p = len({info[c][1] for c in p_cpus})
     print()
     print("  cpu_pinning 建议:")
-    print(f"    other_cores: \"{e[0]}-{e[-1]}\"")
-    print(f"    yolo_core_type: \"pcore\"      # 推理用 P 核 {p[0]}-{p[-1]}")
-    print(f"    RP24_YOLO_infer_threads: {len(phys_p)}   # 关超线程(HT off)；开HT可试 {len(phys_p) * 2}")
+    print(f"    other_cores: \"{rng(e_cpus)}\"")
+    print(f"    yolo_core_type: \"pcore\"      # 推理用 P 核 {rng(p_cpus)}")
+    print(f"    RP24_YOLO_infer_threads: {phys_p}   # 关超线程(HT off)；开HT可试 {phys_p * 2}")
 else:
-    print()
-    print("  只有一组频率：该 CPU 无 P/E 之分，cpu_pinning.enabled 建议保持 false")
+    # 全部核都有超线程（或读不到 core_id）：退回按最大频率分组，最高频那组当作 P
+    groups = collections.defaultdict(list)
+    for cpu, (mhz, cid) in info.items():
+        groups[mhz].append(cpu)
+    sorted_freq = sorted(groups, reverse=True)
+    if len(sorted_freq) >= 2:
+        p = sorted(groups[sorted_freq[0]])
+        e = sorted(groups[sorted_freq[1]])
+        print(f"  无法按超线程区分，退回频率分组：P {rng(p)} ({sorted_freq[0]}MHz) / 其余 {rng(e)} ({sorted_freq[1]}MHz)")
+        print(f"  cpu_pinning 建议: other_cores \"{rng(e)}\", yolo_core_type \"pcore\", infer_threads {len(p) // 2}")
+    else:
+        print(f"  全部 {len(info)} 逻辑核同频 {sorted_freq[0]} MHz：无 P/E 之分，cpu_pinning.enabled 建议 false")
 PYEOF
