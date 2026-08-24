@@ -37,6 +37,7 @@ io/        硬件抽象层：相机/串口/看门狗/共享内存；帧输入统
 tasks/     算法功能层：检测(YOLO)/跟踪/分类/解算/预测/火控/Stage4 可视化
   auto_aim/EKF/         SuperPower EKF 预测系统（SuperPowerEKF/Target/Tracker/Predictor）
   auto_aim/predictor/   TargetManager + AllPredictor/PredictorMain（新 step 接口）
+TorqueController/ 力矩控制仓库（vendored，torque 通道用；缺 Ceres 时仅 serial 可用）
 tools/     通用工具：日志（spdlog）、数学、CPU 绑核等
 users/     应用层：infantry、infantry_debug、visualizer 三个可执行文件
 scripts/   运维脚本：cpu_topology.sh（识别每台机器 P/E 核并给出绑核建议）
@@ -126,7 +127,7 @@ pkg-config --modversion openvino   # 应输出版本号，如 2024.6.0
 ### 1.4 可选依赖
 
 - **ROS2 桥**（`io/ros2/`）：检测到 ROS2 环境才编译，没有也能正常构建（CMake 会提示 `ROS2 not found, skipping ROS2 bridge`）。
-- **TorqueController 力矩下发通道**（`command_channel: torque`）：需要 Ceres 和 `~/TorqueController` 源码，缺任一则仅编译 serial 串口通道（默认即 serial）。
+- **TorqueController 力矩下发通道**（`command_channel: torque`）：源码已 vendor 在仓库内 `TorqueController/`，**只需系统装好 Ceres**；Ceres 缺失时仅编译 serial 串口通道（默认即 serial）。CMake 优先用仓库内目录，找不到再回退 `$HOME/TorqueController`。
 - **相机 SDK**：海康 `libMvCameraControl.so` 已随仓库入库（`io/camera/lib/`），无需另外安装。
 - **模型与测试视频**：`assets/models/`、`assets/InputVideo/` 已入库，无需下载。
 

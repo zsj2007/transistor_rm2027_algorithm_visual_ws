@@ -42,7 +42,12 @@ endif()
 ################## TorqueController 下发通道（可选） ##################
 # command_channel=torque 时使用：把 ~/TorqueController 的 RobotController 编进 io 库。
 # 需要 Ceres（MPC 求解）与 TorqueController 源码；缺任一则仅编译 serial 通道。
-set(TORQUE_CONTROLLER_DIR "$ENV{HOME}/TorqueController" CACHE PATH "TorqueController 源码目录")
+# 优先用仓库内 vendored 的 TorqueController/，找不到再回退 $HOME/TorqueController
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../TorqueController/include/RobotController.h")
+  set(TORQUE_CONTROLLER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../TorqueController")
+else()
+  set(TORQUE_CONTROLLER_DIR "$ENV{HOME}/TorqueController" CACHE PATH "TorqueController 源码目录")
+endif()
 find_package(Ceres QUIET)
 if(Ceres_FOUND AND EXISTS "${TORQUE_CONTROLLER_DIR}/include/RobotController.h")
   message(STATUS "TorqueController channel enabled: ${TORQUE_CONTROLLER_DIR}")

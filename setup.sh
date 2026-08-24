@@ -133,10 +133,12 @@ if [ -f /usr/lib/cmake/Ceres/CeresConfig.cmake ] || [ -f /usr/local/lib/cmake/Ce
 else
   warn "Ceres 未找到：torque 通道不可用（serial 通道不受影响）"
 fi
-if [ -f "${TORQUE_CONTROLLER_DIR:-$HOME/TorqueController}/include/RobotController.h" ]; then
-  ok "TorqueController 源码存在（torque 通道可用）"
+if [ -f "TorqueController/include/RobotController.h" ]; then
+  ok "TorqueController（仓库内 vendored，torque 通道可用）"
+elif [ -f "${TORQUE_CONTROLLER_DIR:-$HOME/TorqueController}/include/RobotController.h" ]; then
+  ok "TorqueController 源码存在（\$HOME，torque 通道可用）"
 else
-  warn "未找到 ~/TorqueController：torque 通道不可用（serial 通道不受影响）"
+  warn "未找到 TorqueController（仓库内或 ~/）：torque 通道不可用（serial 通道不受影响）"
 fi
 
 # ============ 6. 相机 SDK（仓库自带） ============
