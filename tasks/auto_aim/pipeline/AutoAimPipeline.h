@@ -56,6 +56,9 @@ struct AutoAimPipelineData {
         cv::Mat frame;
         cv::Mat com_data_visualize_frame;
         std::chrono::steady_clock::time_point frame_timestamp;
+        // Source-frame clock for EKF dt. For video this advances by 1/FPS
+        // even if the pipeline processes faster than real time.
+        double source_timestamp_s = 0.0;
         std::chrono::steady_clock::time_point node_start_time;
         std::chrono::steady_clock::time_point performance_start_time;
         std::shared_ptr<FrameProfile> performance_profile;

@@ -1,14 +1,16 @@
 // VideoInput.cpp
 #include "other_input/VideoInput.h"
-#include <utility>  // std::swap
+
+#include <cmath>
 
 // 使用在camera.cpp中定义的全局变量
 extern bool g_bExit;
-extern cv::Mat g_image;
+extern FramePacket g_frame_packet;
 extern pthread_mutex_t g_mutex;
 extern bool image_used;
 
-VideoInput::VideoInput(const std::string& filename) : filename(filename) {
+VideoInput::VideoInput(const std::string& filename, double configured_fps)
+    : filename(filename) {
     // 打开视频文件
     cap.open(filename);
     if (!cap.isOpened()) {
@@ -16,6 +18,13 @@ VideoInput::VideoInput(const std::string& filename) : filename(filename) {
         exit(1);
     } else {
         std::cout << "Video file opened successfully: " << filename << std::endl;
+    }
+
+    const double video_fps = cap.get(cv::CAP_PROP_FPS);
+    if (std::isfinite(video_fps) && video_fps > 0.0) {
+        source_fps_ = video_fps;
+    } else if (std::isfinite(configured_fps) && configured_fps > 0.0) {
+        source_fps_ = configured_fps;
     }
 
     // 启动取流线程
@@ -62,12 +71,16 @@ void* VideoInput::workThread(void* pThis) {
         //cv::resize(frame, resized_frame, cv::Size(1280, 1024));
 
         // 线程锁定，更新全局图像
-        while (!image_used && !g_bExit)
+        while (!image_used)
         {
             usleep(1000);
         }
         pthread_mutex_lock(&g_mutex);
-        std::swap(g_image, frame);  // 零拷贝交接：frame 持有自有内存（VideoCapture/imread 分配）
+        g_frame_packet.image = frame.clone();
+        g_frame_packet.timestamp_s =
+            static_cast<double>(pVideo->global_frame_index_) / pVideo->source_fps_;
+        g_frame_packet.frame_id = pVideo->global_frame_index_;
+        ++pVideo->global_frame_index_;
         image_used = false;
         pthread_mutex_unlock(&g_mutex);
         

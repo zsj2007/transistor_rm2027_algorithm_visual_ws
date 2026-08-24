@@ -163,6 +163,7 @@ void Camera::reconnectLoop() {
 
 void Camera::grabLoop() {
     std::cout << "Grab loop started." << std::endl;
+    std::uint64_t next_frame_id = 0;
     
     while (running.load()) {
         // 等待开始取流信号
@@ -223,16 +224,20 @@ void Camera::grabLoop() {
             nRet = MV_CC_GetOneFrameTimeout(handle, pData, nPayloadSize, &stImageInfo, 1000);
             
             if (nRet == MV_OK) {
+                const double frame_timestamp_s = duration<double>(
+                    steady_clock::now().time_since_epoch()).count();
+                const std::uint64_t frame_id = next_frame_id++;
                 // 检查帧数据完整性
                 if (stImageInfo.nFrameLen > 0) {
                     cv::Mat processedImage;
                     if (processImage(pData, stImageInfo, processedImage)) {
                         // 收到有效图像即更新成功时间（用于断流重连判定）
                         lastSuccessTime = steady_clock::now();
-                        // 零拷贝交接：processedImage 始终持有自有内存（见 processImage），
-                        // 锁内 swap 换出，避免每帧一次全图 clone
+                        // Publish pixels and source metadata atomically.
                         pthread_mutex_lock(&g_mutex);
-                        std::swap(g_image, processedImage);
+                        g_frame_packet.image = processedImage.clone();
+                        g_frame_packet.timestamp_s = frame_timestamp_s;
+                        g_frame_packet.frame_id = frame_id;
                         image_used = false;
                         pthread_mutex_unlock(&g_mutex);
                     }
@@ -563,7 +568,7 @@ bool Camera::processImage(unsigned char* pData, MV_FRAME_OUT_INFO_EX& stImageInf
             if (stImageInfo.enPixelType == PixelType_Gvsp_RGB8_Packed) {
                 cv::cvtColor(img, outputImage, cv::COLOR_RGB2BGR);
             } else {
-                // 必须持有自有内存：outputImage 会经 swap 交给 g_image，
+                // 必须持有自有内存：outputImage 最终会发布到 g_frame_packet.image，
                 // 而 img 只是包着 SDK 缓冲 pData，下一帧取流会被覆盖
                 img.copyTo(outputImage);
             }

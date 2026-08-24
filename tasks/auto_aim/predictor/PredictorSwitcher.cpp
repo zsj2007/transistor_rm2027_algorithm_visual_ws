@@ -4,7 +4,8 @@ namespace PredictorType {
     std::vector<std::string> PredictorTypeStrings = {
         "None",
         "RMM",
-        "AutoSwitch(should not be used)"
+        "AutoSwitch(should not be used)",
+        "SuperPowerEKF"
     };
 }
 

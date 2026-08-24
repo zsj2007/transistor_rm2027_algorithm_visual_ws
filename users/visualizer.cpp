@@ -114,10 +114,11 @@ const std::array<std::string, 10> kArmorTypeStrings = {
     "Nearest",
 };
 
-const std::array<std::string, 3> kPredictorTypeStrings = {
+const std::array<std::string, 4> kPredictorTypeStrings = {
     "None",
     "RMM",
     "AutoSwitch",
+    "SuperPowerEKF",
 };
 
 cv::Point2f toCvPoint(const visualizer_shm::Point2f& point)
@@ -323,66 +324,100 @@ private:
     {
         const visualizer_shm::DebugData& msg = snap.debug;
         const float render_fps = updateFrameRate();
-        cv::putText(image,
+
+        // ===== 布局参数 =====
+        // 上方 10~185 基本被 TargetManager 左上状态框占用，
+        // 这里把 visualizer 自己的状态信息整体下移，避免重叠。
+        constexpr int panel_x = 10;
+        constexpr int panel_y = 210;
+        constexpr int text_x  = 20;
+        constexpr int first_y = 235;
+        constexpr int line_gap = 30;
+        constexpr double font_scale = 0.7;
+        constexpr int thickness = 1;
+
+        const int panel_width = std::min(520, std::max(0, image.cols - 20));
+        const int panel_height = 7 * line_gap + 20;
+
+        if (panel_y < image.rows - 20) {
+            const int safe_h = std::min(panel_height, image.rows - panel_y - 10);
+            if (safe_h > 0) {
+                cv::rectangle(
+                    image,
+                    cv::Rect(panel_x, panel_y, panel_width, safe_h),
+                    cv::Scalar(20, 20, 20),
+                    cv::FILLED
+                );
+            }
+        }
+
+        int y = first_y;
+
+        auto put_line = [&](const std::string& text, const cv::Scalar& color)
+        {
+            if (y < image.rows - 5) {
+                cv::putText(
+                    image,
+                    text,
+                    cv::Point(text_x, y),
+                    cv::FONT_HERSHEY_COMPLEX,
+                    font_scale,
+                    color,
+                    thickness,
+                    cv::LINE_AA
+                );
+            }
+            y += line_gap;
+        };
+
+        put_line(
             cv::format("V: %.1f m/s, P: %.1f, Y: %.1f",
-                msg.bullet_velocity, msg.pitch, msg.yaw),
-            cv::Point(20, 50),
-            cv::FONT_HERSHEY_COMPLEX,
-            0.7,
-            cv::Scalar(0, 255, 0),
-            1);
-        cv::putText(image,
+                    msg.bullet_velocity, msg.pitch, msg.yaw),
+            cv::Scalar(0, 255, 0)
+        );
+
+        put_line(
             "enemy_color: " + std::string(msg.enemy_color),
-            cv::Point(20, 80),
-            cv::FONT_HERSHEY_COMPLEX,
-            0.7,
-            cv::Scalar(0, 255, 0),
-            1);
+            cv::Scalar(0, 255, 0)
+        );
 
         const std::string armor_type = msg.armor_type < kArmorTypeStrings.size()
             ? kArmorTypeStrings[msg.armor_type]
             : "Unknown";
+
         const std::string predictor_type = msg.predictor_type < kPredictorTypeStrings.size()
             ? kPredictorTypeStrings[msg.predictor_type]
             : "Unknown";
-        cv::putText(image,
+
+        put_line(
             "aiming " + armor_type + ": " + predictor_type,
-            cv::Point(20, 110),
-            cv::FONT_HERSHEY_COMPLEX,
-            0.7,
-            cv::Scalar(0, 255, 0),
-            1);
+            cv::Scalar(0, 255, 0)
+        );
 
         const auto since_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_time_).count();
-        cv::putText(image,
+
+        put_line(
             cv::format("frame rate: %.1f fps", render_fps),
-            cv::Point(20, 140),
-            cv::FONT_HERSHEY_COMPLEX,
-            0.7,
-            cv::Scalar(0, 255, 0),
-            1);
-        cv::putText(image,
+            cv::Scalar(0, 255, 0)
+        );
+
+        put_line(
             cv::format("algorithm rate: %.1f fps", snap.writer_fps),
-            cv::Point(20, 170),
-            cv::FONT_HERSHEY_COMPLEX,
-            0.7,
-            cv::Scalar(0, 255, 255),
-            1);
-        cv::putText(image,
-            cv::format("since visualizer start: %.4f s", static_cast<float>(since_start_ms) / 1000.0f),
-            cv::Point(20, 200),
-            cv::FONT_HERSHEY_COMPLEX,
-            0.7,
-            cv::Scalar(0, 255, 0),
-            1);
-        cv::putText(image,
-            cv::format("frame_id: %llu", static_cast<unsigned long long>(snap.frame_id)),
-            cv::Point(20, 230),
-            cv::FONT_HERSHEY_COMPLEX,
-            0.7,
-            cv::Scalar(0, 255, 0),
-            1);
+            cv::Scalar(0, 255, 255)
+        );
+
+        put_line(
+            cv::format("since visualizer start: %.4f s",
+                    static_cast<float>(since_start_ms) / 1000.0f),
+            cv::Scalar(0, 255, 0)
+        );
+
+        put_line(
+            cv::format("frame_id: %llu",
+                    static_cast<unsigned long long>(snap.frame_id)),
+            cv::Scalar(0, 255, 0)
+        );
     }
 
     float updateFrameRate()

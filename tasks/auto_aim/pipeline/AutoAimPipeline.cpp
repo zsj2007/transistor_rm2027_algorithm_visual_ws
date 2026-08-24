@@ -443,7 +443,7 @@ void AutoAimPipeline::Stage3::run()
             predictor_main->step(
                 d->stage2.solved_results,
                 d->initial.frame,
-                PredictorType::AutoSwitch,
+                d->initial.source_timestamp_s,
                 ArmorType::Nearest,
                 d->initial.auto_aim_switch,
                 d->initial.mcu_yaw_online);

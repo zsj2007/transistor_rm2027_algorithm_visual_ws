@@ -11,8 +11,9 @@
 #include <condition_variable>
 #include <opencv2/opencv.hpp>
 #include "MvCameraControl.h"
+#include "other_input/FramePacket.h"
 
-extern cv::Mat g_image;
+extern FramePacket g_frame_packet;
 extern pthread_mutex_t g_mutex;
 extern bool g_bExit;
 extern bool image_used;

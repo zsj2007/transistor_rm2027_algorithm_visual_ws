@@ -1,0 +1,306 @@
+#include "EKF/SuperPowerTarget.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <utility>
+
+namespace sp_ekf {
+namespace {
+constexpr double kPi = 3.141592653589793238462643383279502884;
+}
+
+Target::Target(const ArmorObservation& armor,
+               double radius,
+               int armor_num,
+               const Eigen::VectorXd& P0_diag)
+    : armor_num_(armor_num) {
+    // SP 模型中装甲位置 = 中心 - r*[cos(angle), sin(angle)]，据此反推中心。
+    const double center_x = armor.xyz[0] + radius * std::cos(armor.angle);
+    const double center_y = armor.xyz[1] + radius * std::sin(armor.angle);
+    const double center_z = armor.xyz[2];
+
+    // SP 11 维状态顺序：x vx y vy z vz a w r l h。
+    // a/w 为车体相位及角速度；r 为主半径，l/h 描述交替装甲的半径/高度差。
+    Eigen::VectorXd x0(11);
+    x0 << center_x, 0.0,
+          center_y, 0.0,
+          center_z, 0.0,
+          armor.angle, 0.0,
+          radius, 0.0, 0.0;
+
+    const Eigen::MatrixXd P0 = P0_diag.asDiagonal();
+    auto x_add = [](const Eigen::VectorXd& a,
+                    const Eigen::VectorXd& b) -> Eigen::VectorXd {
+        Eigen::VectorXd c = a + b;
+        // 每次状态校正后将相位限制在主值区间，避免跨 pi 时出现不连续。
+        while (c[6] > kPi) c[6] -= 2.0 * kPi;
+        while (c[6] <= -kPi) c[6] += 2.0 * kPi;
+        return c;
+    };
+
+    ekf_ = ExtendedKalmanFilter(x0, P0, x_add);
+}
+
+void Target::predict(double dt) {
+    // 平移位置与速度、相位与角速度均采用匀速模型；r/l/h 视为随机常量。
+    Eigen::MatrixXd F(11, 11);
+    F << 1, dt, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+         0, 1,  0, 0, 0, 0, 0, 0, 0, 0, 0,
+         0, 0,  1, dt,0, 0, 0, 0, 0, 0, 0,
+         0, 0,  0, 1, 0, 0, 0, 0, 0, 0, 0,
+         0, 0,  0, 0, 1, dt,0, 0, 0, 0, 0,
+         0, 0,  0, 0, 0, 1, 0, 0, 0, 0, 0,
+         0, 0,  0, 0, 0, 0, 1, dt,0, 0, 0,
+         0, 0,  0, 0, 0, 0, 0, 1, 0, 0, 0,
+         0, 0,  0, 0, 0, 0, 0, 0, 1, 0, 0,
+         0, 0,  0, 0, 0, 0, 0, 0, 0, 1, 0,
+         0, 0,  0, 0, 0, 0, 0, 0, 0, 0, 1;
+
+    // SP Target::predict() 的普通四装甲过程噪声强度。
+    constexpr double v1 = 100.0;
+    constexpr double v2 = 400.0;
+    const double a = dt * dt * dt * dt / 4.0;
+    const double b = dt * dt * dt / 2.0;
+    const double c = dt * dt;
+
+    // 对每个“位置-速度”二元组采用白噪声加速度离散化块 [dt^4/4, dt^3/2; dt^3/2, dt^2]。
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(11, 11);
+    Q(0,0)=a*v1; Q(0,1)=b*v1; Q(1,0)=b*v1; Q(1,1)=c*v1;
+    Q(2,2)=a*v1; Q(2,3)=b*v1; Q(3,2)=b*v1; Q(3,3)=c*v1;
+    Q(4,4)=a*v1; Q(4,5)=b*v1; Q(5,4)=b*v1; Q(5,5)=c*v1;
+    Q(6,6)=a*v2; Q(6,7)=b*v2; Q(7,6)=b*v2; Q(7,7)=c*v2;
+    // h = x[10]，高度差加入很小的随机游走过程噪声，
+    // 防止连续观测时 P_h 一直缩小到过度自信。
+    // ps：量级很小没啥用，视频测试随机移动+旋转一直会h与z有问题，调整到0.25后虽然h不太稳，但是放在装甲板上1cm并不会打在外面
+    // 实车还需测试
+    constexpr double q_h = 2.5e-1;  // m^2 / s
+    Q(10, 10) = q_h * dt;
+
+    auto f = [&](const Eigen::VectorXd& x) -> Eigen::VectorXd {
+        Eigen::VectorXd prior = F * x;
+        prior[6] = limitRad(prior[6]);
+        return prior;
+    };
+    ekf_.predict(F, Q, f);
+}
+
+TargetUpdateDebug Target::update(const ArmorObservation& armor) {
+    TargetUpdateDebug debug;
+    const std::vector<Eigen::Vector4d> xyza_list = armorXyzaList();
+
+    std::vector<std::pair<Eigen::Vector4d, int>> candidates;
+    candidates.reserve(armor_num_);
+    for (int i = 0; i < armor_num_; ++i) {
+        candidates.push_back({xyza_list[static_cast<std::size_t>(i)], i});
+    }
+
+    // 先按距离排序，仅考察最近的三个候选装甲，沿用 SP 的关联策略。
+    std::sort(
+        candidates.begin(), candidates.end(),
+        [](const std::pair<Eigen::Vector4d, int>& lhs,
+           const std::pair<Eigen::Vector4d, int>& rhs) {
+            return lhs.first.head<3>().norm() < rhs.first.head<3>().norm();
+        });
+
+    int id = 0;
+    double min_angle_error = std::numeric_limits<double>::infinity();
+    const Eigen::Vector3d armor_ypd = xyz2ypd(armor.xyz);
+    const int inspect_count = std::min(3, armor_num_);
+    // 角度代价同时考虑装甲外法线和视线 yaw，从而区分相近位置的不同装甲面。
+    for (int i = 0; i < inspect_count; ++i) {
+        const Eigen::Vector4d& xyza = candidates[static_cast<std::size_t>(i)].first;
+        const Eigen::Vector3d ypd = xyz2ypd(xyza.head<3>());
+        const double angle_error =
+            std::abs(limitRad(armor.angle - xyza[3])) +
+            std::abs(limitRad(armor_ypd[0] - ypd[0]));
+        if (std::abs(angle_error) < std::abs(min_angle_error)) {
+            id = candidates[static_cast<std::size_t>(i)].second;
+            min_angle_error = angle_error;
+        }
+    }
+
+    debug.matched_id = id;
+    debug.armor_switched = (id != last_id_);
+    debug.predicted_xyza = xyza_list[static_cast<std::size_t>(id)];
+    debug.position_error =
+        (armor.xyz - debug.predicted_xyza.head<3>()).norm();
+    debug.angle_error = std::abs(limitRad(armor.angle - debug.predicted_xyza[3]));
+
+    // 关联完成后更新切换/收敛统计，并在选中的装甲观测模型上校正 EKF。
+    is_switch_ = debug.armor_switched;
+    if (is_switch_) ++switch_count_;
+    last_id_ = id;
+    ++update_count_;
+
+    updateYpda(armor, id);
+    debug.nis = ekf_.last_nis;
+    return debug;
+}
+
+void Target::updateYpda(const ArmorObservation& armor, int id) {
+    // 将笛卡尔位置观测转换为 [yaw, pitch, distance, armor_angle]，以匹配 SP 量测空间。
+    const Eigen::MatrixXd H = hJacobian(ekf_.x, id);
+
+    const double center_yaw = std::atan2(armor.xyz[1], armor.xyz[0]);
+    const double delta_angle = limitRad(armor.angle - center_yaw);
+    const Eigen::Vector3d ypd = xyz2ypd(armor.xyz);
+
+    // 量测噪声随相对角度和距离自适应放大，保留上游经验模型。
+    Eigen::VectorXd R_diag(4);
+    R_diag << 4e-3,
+              4e-3,
+              std::log(std::abs(delta_angle) + 1.0) + 1.0,
+              std::log(std::abs(ypd[2]) + 1.0) / 200.0 + 9e-2;
+    const Eigen::MatrixXd R = R_diag.asDiagonal();
+
+    auto h = [&](const Eigen::VectorXd& x) -> Eigen::Vector4d {
+        const Eigen::Vector3d xyz = armorXyz(x, id);
+        const Eigen::Vector3d local_ypd = xyz2ypd(xyz);
+        const double angle = limitRad(
+            x[6] + id * 2.0 * kPi / static_cast<double>(armor_num_));
+        return {local_ypd[0], local_ypd[1], local_ypd[2], angle};
+    };
+
+    // yaw、pitch 与装甲角均是周期量；残差必须走最短角距离。
+    auto z_subtract = [](const Eigen::VectorXd& a,
+                         const Eigen::VectorXd& b) -> Eigen::VectorXd {
+        Eigen::VectorXd c = a - b;
+        while (c[0] > kPi) c[0] -= 2.0 * kPi;
+        while (c[0] <= -kPi) c[0] += 2.0 * kPi;
+        while (c[1] > kPi) c[1] -= 2.0 * kPi;
+        while (c[1] <= -kPi) c[1] += 2.0 * kPi;
+        while (c[3] > kPi) c[3] -= 2.0 * kPi;
+        while (c[3] <= -kPi) c[3] += 2.0 * kPi;
+        return c;
+    };
+
+    Eigen::VectorXd z(4);
+    z << ypd[0], ypd[1], ypd[2], armor.angle;
+    ekf_.update(z, H, R, h, z_subtract);
+}
+
+Eigen::VectorXd Target::ekfX() const { return ekf_.x; }
+
+const ExtendedKalmanFilter& Target::ekf() const { return ekf_; }
+
+std::vector<Eigen::Vector4d> Target::armorXyzaList() const {
+    std::vector<Eigen::Vector4d> result;
+    result.reserve(static_cast<std::size_t>(armor_num_));
+    // 按编号生成每块装甲的 [x, y, z, outward-normal angle] 预测值。
+    for (int i = 0; i < armor_num_; ++i) {
+        const double angle = limitRad(
+            ekf_.x[6] + i * 2.0 * kPi / static_cast<double>(armor_num_));
+        const Eigen::Vector3d xyz = armorXyz(ekf_.x, i);
+        result.push_back({xyz[0], xyz[1], xyz[2], angle});
+    }
+    return result;
+}
+
+bool Target::diverged() const {
+    // r 与 r+l 分别对应两组对置装甲半径，任一超出合理范围即视为发散。
+    const bool r_ok = ekf_.x[8] > 0.1 && ekf_.x[8] < 0.4;
+    const bool l_ok = (ekf_.x[8] + ekf_.x[9]) > 0.1 &&
+                      (ekf_.x[8] + ekf_.x[9]) < 0.4;
+    return !(r_ok && l_ok);
+}
+
+bool Target::converged() {
+    // 至少经过四次量测更新且几何参数正常后，目标才可认为已收敛。
+    if (update_count_ > 3 && !diverged()) {
+        is_converged_ = true;
+    }
+    return is_converged_;
+}
+
+Eigen::Vector3d Target::armorXyz(const Eigen::VectorXd& x, int id) const {
+    const double angle = limitRad(
+        x[6] + id * 2.0 * kPi / static_cast<double>(armor_num_));
+    // 四装甲模型中 1/3 号面使用另一组半径和高度偏置，其余使用基准 r/中心高度。
+    const bool use_l_h = armor_num_ == 4 && (id == 1 || id == 3);
+    const double r = use_l_h ? x[8] + x[9] : x[8];
+    const double armor_x = x[0] - r * std::cos(angle);
+    const double armor_y = x[2] - r * std::sin(angle);
+    const double armor_z = use_l_h ? x[4] + x[10] : x[4];
+    return {armor_x, armor_y, armor_z};
+}
+
+Eigen::MatrixXd Target::hJacobian(const Eigen::VectorXd& x, int id) const {
+    // 先构造状态到装甲 [x,y,z,angle] 的导数，再左乘 xyz 到 y/p/d 的坐标变换雅可比。
+    const double angle = limitRad(
+        x[6] + id * 2.0 * kPi / static_cast<double>(armor_num_));
+    const bool use_l_h = armor_num_ == 4 && (id == 1 || id == 3);
+    const double r = use_l_h ? x[8] + x[9] : x[8];
+
+    const double dx_da = r * std::sin(angle);
+    const double dy_da = -r * std::cos(angle);
+    const double dx_dr = -std::cos(angle);
+    const double dy_dr = -std::sin(angle);
+    const double dx_dl = use_l_h ? -std::cos(angle) : 0.0;
+    const double dy_dl = use_l_h ? -std::sin(angle) : 0.0;
+    const double dz_dh = use_l_h ? 1.0 : 0.0;
+
+    Eigen::MatrixXd H_armor_xyza = Eigen::MatrixXd::Zero(4, 11);
+    H_armor_xyza(0,0)=1.0; H_armor_xyza(0,6)=dx_da;
+    H_armor_xyza(0,8)=dx_dr; H_armor_xyza(0,9)=dx_dl;
+    H_armor_xyza(1,2)=1.0; H_armor_xyza(1,6)=dy_da;
+    H_armor_xyza(1,8)=dy_dr; H_armor_xyza(1,9)=dy_dl;
+    H_armor_xyza(2,4)=1.0; H_armor_xyza(2,10)=dz_dh;
+    H_armor_xyza(3,6)=1.0;
+
+    const Eigen::Vector3d armor_xyz = armorXyz(x, id);
+    const Eigen::Matrix3d H_armor_ypd = xyz2ypdJacobian(armor_xyz);
+
+    Eigen::Matrix4d H_armor_ypda = Eigen::Matrix4d::Zero();
+    H_armor_ypda.block<3,3>(0,0) = H_armor_ypd;
+    H_armor_ypda(3,3) = 1.0;
+    return H_armor_ypda * H_armor_xyza;
+}
+
+double Target::limitRad(double angle) {
+    while (angle > kPi) angle -= 2.0 * kPi;
+    while (angle <= -kPi) angle += 2.0 * kPi;
+    return angle;
+}
+
+Eigen::Vector3d Target::xyz2ypd(const Eigen::Vector3d& xyz) {
+    const double x = xyz[0];
+    const double y = xyz[1];
+    const double z = xyz[2];
+    const double yaw = std::atan2(y, x);
+    const double horizontal = std::sqrt(x * x + y * y);
+    const double pitch = std::atan2(z, horizontal);
+    const double distance = std::sqrt(x * x + y * y + z * z);
+    return {yaw, pitch, distance};
+}
+
+Eigen::Matrix3d Target::xyz2ypdJacobian(const Eigen::Vector3d& xyz) {
+    const double x = xyz[0];
+    const double y = xyz[1];
+    const double z = xyz[2];
+
+    // 与 SP 相同的解析雅可比。极小下限仅处理目标恰在 z 轴上的坐标奇点，避免 NaN。
+    const double xy2 = std::max(x * x + y * y, 1e-12);
+    const double xy = std::sqrt(xy2);
+    const double d2 = std::max(xy2 + z * z, 1e-12);
+    const double d = std::sqrt(d2);
+
+    const double dyaw_dx = -y / xy2;
+    const double dyaw_dy = x / xy2;
+
+    const double dpitch_dx = -(x * z) / (d2 * xy);
+    const double dpitch_dy = -(y * z) / (d2 * xy);
+    const double dpitch_dz = xy / d2;
+
+    const double ddistance_dx = x / d;
+    const double ddistance_dy = y / d;
+    const double ddistance_dz = z / d;
+
+    Eigen::Matrix3d J;
+    J << dyaw_dx,      dyaw_dy,      0.0,
+         dpitch_dx,    dpitch_dy,    dpitch_dz,
+         ddistance_dx, ddistance_dy, ddistance_dz;
+    return J;
+}
+
+}  // namespace sp_ekf

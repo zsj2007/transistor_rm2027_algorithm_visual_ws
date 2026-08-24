@@ -11,6 +11,9 @@ find_package(g2o REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(OpenVINO REQUIRED openvino)
+# OpenVINO 2024.6 apt pkg-config lists JAX frontend, but the Ubuntu package does not ship it.
+# This project uses OpenVINO IR (.xml/.bin), so JAX frontend is not required.
+list(REMOVE_ITEM OpenVINO_LIBRARIES openvino_jax_frontend)
 # MkvWriter（TwoVideoLogger）依赖 ffmpeg
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libavutil libswscale)
 
@@ -26,9 +29,14 @@ add_library(tasks STATIC
     auto_aim/3d_processing/RestFrame.cpp
     auto_aim/predictor/PositionPredictor2D.cpp
     auto_aim/predictor/PeriodicDataPredictor.cpp
-    auto_aim/predictor/RotationMotionModel.cpp
-    auto_aim/predictor/AllPredictor.cpp
+    # PredictorSwitcher.cpp remains only for PredictorType ABI/UI labels.
     auto_aim/predictor/PredictorSwitcher.cpp
+    auto_aim/EKF/SuperPowerEKF.cpp
+    auto_aim/EKF/SuperPowerTarget.cpp
+    auto_aim/EKF/SuperPowerTracker.cpp
+    auto_aim/EKF/SuperPowerPredictor.cpp
+    auto_aim/predictor/AllPredictor.cpp
+    auto_aim/predictor/TargetManager.cpp
     auto_aim/predictor/PredictorMain.cpp
     auto_aim/visualizer/DataVisualizer.cpp
     auto_aim/utils/FrameRateCounter.cpp

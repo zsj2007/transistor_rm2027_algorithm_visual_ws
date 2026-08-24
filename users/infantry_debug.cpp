@@ -108,6 +108,7 @@ int main(int argc, char * argv[])
 
   cv::Mat img;
   std::chrono::steady_clock::time_point t;
+  double source_timestamp_s = 0.0;
   bool last_auto_aim_switch = true;
   float last_send_pitch = 0.0f;
   double last_send_yaw = 0.0;
@@ -118,7 +119,7 @@ int main(int argc, char * argv[])
     auto now = std::chrono::steady_clock::now();
 
     // ① 取帧（阻塞到新帧）
-    camera.read(img, t);
+    camera.read(img, t, source_timestamp_s);
     if (img.empty()) continue;
 
     // ② 传感器状态（延迟对齐后）
@@ -136,6 +137,7 @@ int main(int argc, char * argv[])
     AutoAimPipelineData::InitialData initial;
     initial.frame = std::move(img);
     initial.frame_timestamp = t;
+    initial.source_timestamp_s = source_timestamp_s;
     initial.node_start_time = node_start_time;
     initial.performance_start_time = now;
     initial.bullet_velocity = static_cast<float>(state.bullet_velocity);

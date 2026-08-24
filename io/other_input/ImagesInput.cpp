@@ -1,14 +1,19 @@
 // ImagesInput.cpp
 #include "other_input/ImagesInput.h"
-#include <utility>  // std::swap
+
+#include <cmath>
 
 // 使用在camera.cpp中定义的全局变量
 extern bool g_bExit;
-extern cv::Mat g_image;
+extern FramePacket g_frame_packet;
 extern pthread_mutex_t g_mutex;
 extern bool image_used;
 
-ImagesInput::ImagesInput(const std::string& folderPath) : currentIndex(0) {
+ImagesInput::ImagesInput(const std::string& folderPath, double configured_fps)
+    : currentIndex(0) {
+    if (std::isfinite(configured_fps) && configured_fps > 0.0) {
+        source_fps_ = configured_fps;
+    }
     // 获取文件夹中所有图片文件
     DIR *dir;
     struct dirent *ent;
@@ -66,7 +71,11 @@ void* ImagesInput::workThread(void* pThis) {
 
         // 更新全局图像
         pthread_mutex_lock(&g_mutex);
-        std::swap(g_image, frame);  // 零拷贝交接：frame 持有自有内存（imread 分配）
+        g_frame_packet.image = frame.clone();
+        g_frame_packet.timestamp_s =
+            static_cast<double>(pImages->global_frame_index_) / pImages->source_fps_;
+        g_frame_packet.frame_id = pImages->global_frame_index_;
+        ++pImages->global_frame_index_;
         image_used = false;
         pthread_mutex_unlock(&g_mutex);
         

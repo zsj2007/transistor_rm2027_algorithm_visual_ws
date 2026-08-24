@@ -79,6 +79,21 @@ images_relative_path : "assets/InputImages" # 使用图片输入时的图片文�
 
 RMM_visualize_zoom_out_factor : 10.0 # 平面可视化缩放系数，该值越大视野范围越大
 
+# Persistent physical-target lifecycle for SuperPower EKF.
+target_manager:
+  min_detect_frames: 5
+  max_temp_lost_frames: 15
+  outpost_max_temp_lost_frames: 75
+  enable_priority_switch: false
+
+# Validated normal four-armor SuperPower EKF adapter settings.
+superpower_ekf:
+  min_detect_count: 3
+  max_temp_lost_count: 10
+  max_dt_s: 0.1
+  initial_radius_m: 0.38
+  armor_num: 4
+
 # 可视化设置
 visualizer:
   enable: true # 是否启用可视化

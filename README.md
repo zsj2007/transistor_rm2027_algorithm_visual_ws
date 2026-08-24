@@ -167,6 +167,32 @@ cmake --build build -j$(nproc)
 
 可视化进程没启动时，算法侧会自动跳过发布（几乎零开销）；启动后每帧多约 0.5~1ms（Stage4 共享内存拷贝）。不需要调试画面时把 `publish_topics: false` 即可完全关掉。
 
+### 3.4 CPU 绑核（每台机器必须自己配，禁止照抄）
+
+`configs/*.yaml` 里的 `cpu_pinning:` 是按**本机 CPU 拓扑**写的，换机器必须重新配置，否则会踩两个坑：
+
+1. **P/E 核识别错误**：不要按“频率最高那组= P 核”猜，Intel 混合架构里 P 核的最大频率可能不统一（如 i9-12900HK 是 4.9/5.0GHz 混着），正确依据是**超线程**——P 核一个物理核有 2 个逻辑核、E 核没有。跑仓库自带的脚本自动识别：
+
+   ```bash
+   ./scripts/cpu_topology.sh
+   ```
+
+   它会打印每核最大频率、超线程配对，并给出 `other_cores` / `yolo_core_type` / `RP24_YOLO_infer_threads` 建议。
+
+2. **`enabled: true` 会锁死推理线程**：`enabled: true` 把主线程绑到 `other_cores`（E 核），之后创建的 OpenVINO 推理线程会继承这个亲和掩码，此时 `yolo_core_type: "pcore"` **无法突破**，推理会实际跑到 E 核上、速度暴跌。当前代码下正确的用法是：
+
+   ```yaml
+   cpu_pinning:
+     enabled: false        # 别绑主线程，让 OpenVINO 自己能迁移
+     yolo_core_type: "pcore"
+     yolo_enable_cpu_pinning: true
+   RP24_YOLO_infer_threads : <物理P核数>   # HT off；开HT 可试 <物理P核数×2>
+   ```
+
+   各字段含义：`other_cores` = 主线程/流水线等非推理线程的核；`yolo_core_type` = 推理线程限定 pcore/ecore/any；`yolo_enable_hyper_threading` = 是否用超线程逻辑核；`yolo_cores` + `yolo_pool_threads` = 给 YOLO 预处理/后处理单独建线程池（建议放 E 核，别和推理抢 P 核）。
+
+   笔记本上跑满 3 分钟后 `yolo_infer` 如果从低值缓慢爬升，通常是热/功耗降频：先确认插电 + `sudo powerprofilesctl set performance`，再考虑换 `ecore` 或降低 `frame_rate` 匹配处理能力（`in_q` 稳定 0~1 为健康）。
+
 ## 4. frame rate / algorithm rate / 日志 FPS 到底是什么
 
 这三个数各自测量的是**不同环节的速率**，别拿它们直接对等：

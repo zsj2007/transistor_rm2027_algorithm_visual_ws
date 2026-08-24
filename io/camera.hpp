@@ -25,7 +25,9 @@ public:
   Camera & operator=(const Camera &) = delete;
 
   // 阻塞到新帧就绪，再零拷贝换出（原 processImage 的 image_used + swap）
-  bool read(cv::Mat & img, std::chrono::steady_clock::time_point & t);
+  bool read(cv::Mat & img,
+            std::chrono::steady_clock::time_point & t,
+            double & source_timestamp_s);
 
 private:
   std::unique_ptr<::Camera> camera_;          // GigE/USB 相机

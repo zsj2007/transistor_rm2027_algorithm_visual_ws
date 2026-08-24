@@ -17,7 +17,8 @@ namespace PredictorType {
     enum PredictorType {
         None = 0,   // 直接瞄准装甲板
         RotationMotionModel,
-        AutoSwitch
+        AutoSwitch,
+        SuperPowerEKF
     };
 
     extern std::vector<std::string> PredictorTypeStrings;
