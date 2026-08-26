@@ -19,11 +19,11 @@ CLASSIFIER_SHM_KEY : 0x0250
 classifier_model_relative_path : "assets/models/model_rm2026_openvino/model.xml"
 
 use_RP24_YOLO : true # 改为 true 启用 YOLO 检测管线（当前为同济 yolov5）
-RP24_YOLO_model_relative_path : "assets/models/RP24_YOLO/0526.xml" # RP24 0526 模型 IR（可选 0526_int8.xml）
+RP24_YOLO_model_relative_path : "assets/models/RP24_YOLO/0526_dynamic.onnx" # RP24 0526 模型 IR（可选 0526_int8.xml）
 RP24_YOLO_device : "CPU"
 RP24_YOLO_model_family : "rp24" # rp24 或 tongji_yolov5（同济模型颜色/类别语义不同）
 RP24_YOLO_letterbox : false # 同济模型用 letterbox；rp24/0526 模型训练时是拉伸，需保持一致
-RP24_YOLO_input_size : 640 # 模型输入边长，必须与模型一致
+RP24_YOLO_input_size : 352 # 模型输入边长，必须与模型一致（动态模型支持 320/512/640，须能被32整除）
 RP24_YOLO_infer_threads : 4 # 推理总线程数（基线：全核自由调度时 8 线程 ≈10.8ms）
 RP24_YOLO_infer_streams : 1 # 并发推理请求数（本机 4 个物理 P 核撑不起 2 流）
 
@@ -70,7 +70,7 @@ visualizer:
   shm_key: 0x0251 # 可视化共享内存 key（与 visualizer 进程保持一致）
   log_video: false # 是否录制视频
 
-frame_rate : 50.0 # fps；输入应≤流水线处理能力，否则队列积压拉高端到端延迟
+frame_rate : 90.0 # fps；输入应≤流水线处理能力，否则队列积压拉高端到端延迟
 serial_delay_time : 30.0 # ms 电控传来的信息相对相机画面快的时间，将对电控信息再延迟这个时间以同步两者
 serial_port : "" # 电控主串口，如 "/dev/ttyACM1"；留空 = 自动检测（跳过产品名含 IMU 的口）
 log_send_commands : true # 打开后每帧把实际下发的 pitch/yaw/fire 打到控制台，便于核对下位机收到的内容

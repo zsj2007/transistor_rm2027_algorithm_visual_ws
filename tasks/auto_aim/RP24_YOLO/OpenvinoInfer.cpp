@@ -40,7 +40,10 @@ OpenvinoInfer::OpenvinoInfer(string model_path_xml, string model_path_bin, strin
     // Step . Inizialize Preprocessing for the model
     ppp = new ov::preprocess::PrePostProcessor(model);
     // Specify input image format
-    ppp->input().tensor().set_element_type(ov::element::u8).set_layout("NHWC").set_color_format(ov::preprocess::ColorFormat::BGR); 
+    // set_shape 固定输入张量为 [1, input_size, input_size, 3]：
+    // 静态模型等价于原形状；动态模型（0526_dynamic）会按配置的 input_size 定型，
+    // 否则 infer() 用 compiled_model.input().get_shape() 拿到的是动态维度会报错。
+    ppp->input().tensor().set_shape(input_shape).set_element_type(ov::element::u8).set_layout("NHWC").set_color_format(ov::preprocess::ColorFormat::BGR); 
     //NHWC:batchsize,height,width,channels
     // Specify preprocess pipeline to input image without resizing
     ppp->input().preprocess().convert_element_type(ov::element::f32).convert_color(ov::preprocess::ColorFormat::RGB).scale({255., 255., 255.});
