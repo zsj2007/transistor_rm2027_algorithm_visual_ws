@@ -43,6 +43,9 @@ public:
     // 新增3D到像素坐标投影函数
     cv::Point2f project3DToPixel(const cv::Point3f& world_point) const;
 
+    // 使用与 solveArmor 相同的相机光心到枪口坐标平移。
+    cv::Point3f cameraToMuzzleP3f(const cv::Point3f& camera_point) const;
+
     AimResult solveArmor(const ArmorResult& armor_result, const double last_pitch_rad_, const double last_yaw_rad_) const; // 增加number参数
     
     

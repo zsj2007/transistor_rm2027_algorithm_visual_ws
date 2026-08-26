@@ -43,7 +43,9 @@ public:
                                       const Eigen::VectorXd&)> z_subtract =
             [](const Eigen::VectorXd& a, const Eigen::VectorXd& b) {
                 return a - b;
-            });
+            },
+        double nis_threshold = 0.711,
+        double nees_threshold = 0.711);
 
     // 非线性观测更新：h 为观测函数，H 为其在当前状态处的雅可比矩阵。
     Eigen::VectorXd update(
@@ -55,7 +57,9 @@ public:
                                       const Eigen::VectorXd&)> z_subtract =
             [](const Eigen::VectorXd& a, const Eigen::VectorXd& b) {
                 return a - b;
-            });
+            },
+        double nis_threshold = 0.711,
+        double nees_threshold = 0.711);
 
     // 对外导出的滤波健康度诊断量，不参与数据关联决策。
     std::map<std::string, double> data;

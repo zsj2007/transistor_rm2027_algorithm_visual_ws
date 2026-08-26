@@ -46,10 +46,12 @@ Eigen::VectorXd ExtendedKalmanFilter::update(
     const Eigen::MatrixXd& H,
     const Eigen::MatrixXd& R,
     std::function<Eigen::VectorXd(const Eigen::VectorXd&,
-                                  const Eigen::VectorXd&)> z_subtract) {
+                                  const Eigen::VectorXd&)> z_subtract,
+    double nis_threshold,
+    double nees_threshold) {
     return update(z, H, R,
                   [&](const Eigen::VectorXd& value) { return H * value; },
-                  std::move(z_subtract));
+                  std::move(z_subtract), nis_threshold, nees_threshold);
 }
 
 Eigen::VectorXd ExtendedKalmanFilter::update(
@@ -58,7 +60,9 @@ Eigen::VectorXd ExtendedKalmanFilter::update(
     const Eigen::MatrixXd& R,
     std::function<Eigen::VectorXd(const Eigen::VectorXd&)> h,
     std::function<Eigen::VectorXd(const Eigen::VectorXd&,
-                                  const Eigen::VectorXd&)> z_subtract) {
+                                  const Eigen::VectorXd&)> z_subtract,
+    double nis_threshold,
+    double nees_threshold) {
     // 保存更新前状态，以便计算本次校正幅度的 NEES 诊断量。
     const Eigen::VectorXd x_prior = x;
     // S = HPH^T + R 为创新协方差，K 将观测残差映射到状态校正量。
@@ -75,10 +79,6 @@ Eigen::VectorXd ExtendedKalmanFilter::update(
     const double nis = residual.transpose() * S.inverse() * residual;
     const double nees =
         (x - x_prior).transpose() * P.inverse() * (x - x_prior);
-
-    // 上游固定阈值；此处仅记录失败次数，不改变本次已经完成的量测更新。
-    constexpr double nis_threshold = 0.711;
-    constexpr double nees_threshold = 0.711;
 
     if (nis > nis_threshold) {
         ++nis_count_;

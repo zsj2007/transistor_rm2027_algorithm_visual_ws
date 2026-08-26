@@ -48,6 +48,7 @@ struct VisualizerConfig {
         bool lights = true;
         bool armors = true;
         bool solved_armors = true;
+        bool joint_ekf_pair = true;
         bool predictions = true;
         bool yaw_curve = true;
         bool rmm = true;
@@ -79,6 +80,7 @@ struct VisualizerConfig {
             config.draw.lights = readBool(draw, "lights", config.draw.lights);
             config.draw.armors = readBool(draw, "armors", config.draw.armors);
             config.draw.solved_armors = readBool(draw, "solved_armors", config.draw.solved_armors);
+            config.draw.joint_ekf_pair = readBool(draw, "joint_ekf_pair", config.draw.joint_ekf_pair);
             config.draw.predictions = readBool(draw, "predictions", config.draw.predictions);
             config.draw.yaw_curve = readBool(draw, "yaw_curve", config.draw.yaw_curve);
             config.draw.rmm = readBool(draw, "rmm", config.draw.rmm);
@@ -229,6 +231,7 @@ private:
                   << " | lights=" << d.light_count
                   << " armors=" << d.armor_count
                   << " solved=" << d.solved_count
+                  << " joint_ekf_pair=" << d.joint_ekf_count
                   << " alg_fps=" << snap.writer_fps
                   << " | yaw=" << d.yaw << " pitch=" << d.pitch
                   << " raw=" << snap.raw_frame.cols << "x" << snap.raw_frame.rows
@@ -314,6 +317,9 @@ private:
         }
         if (config_.draw.solved_armors) {
             drawSolvedArmors(image, msg);
+        }
+        if (config_.draw.joint_ekf_pair) {
+            drawJointEkfPairs(image, msg);
         }
         if (config_.draw.gimbal_coordinate) {
             drawGimbalCoordinate(image, msg);
@@ -442,6 +448,69 @@ private:
             return 0.0f;
         }
         return static_cast<float>(static_cast<double>(frame_time_history_.size()) / frame_time_sum_);
+    }
+
+    void drawJointEkfPairs(cv::Mat& image, const visualizer_shm::DebugData& msg)
+    {
+        constexpr double font_scale = 0.6;
+        constexpr int font_thickness = 2;
+
+        for (uint32_t i = 0; i < msg.joint_ekf_count; ++i) {
+            const visualizer_shm::JointEkfPair& pair = msg.joint_ekf_pairs[i];
+            const cv::Point2f center_a = toCvPoint(pair.center_a);
+            const cv::Point2f center_b = toCvPoint(pair.center_b);
+            const cv::Point2f midpoint = (center_a + center_b) * 0.5F;
+            const cv::Scalar color =
+                pair.ready ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 255, 255);
+            const int line_thickness = pair.ready ? 4 : 2;
+
+            cv::line(image, center_a, center_b, color, line_thickness, cv::LINE_AA);
+            cv::circle(image, center_a, 7, color, 2, cv::LINE_AA);
+            cv::circle(image, center_b, 7, color, 2, cv::LINE_AA);
+
+            const std::string label = pair.ready
+                ? "JointEKF Ready"
+                : cv::format(
+                    "JointEKF %d/2",
+                    std::min(pair.consecutive_frames, 2));
+            int baseline = 0;
+            const cv::Size text_size = cv::getTextSize(
+                label,
+                cv::FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                font_thickness,
+                &baseline);
+            cv::Point text_pos(
+                cvRound(midpoint.x - text_size.width * 0.5F),
+                cvRound(midpoint.y - 10.0F));
+            text_pos.x = std::clamp(
+                text_pos.x,
+                0,
+                std::max(0, image.cols - text_size.width));
+            text_pos.y = std::clamp(
+                text_pos.y,
+                text_size.height,
+                std::max(text_size.height, image.rows - baseline));
+
+            cv::putText(
+                image,
+                label,
+                text_pos,
+                cv::FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                cv::Scalar(0, 0, 0),
+                font_thickness + 3,
+                cv::LINE_AA);
+            cv::putText(
+                image,
+                label,
+                text_pos,
+                cv::FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                color,
+                font_thickness,
+                cv::LINE_AA);
+        }
     }
 
     void drawSolvedArmors(cv::Mat& image, const visualizer_shm::DebugData& msg)

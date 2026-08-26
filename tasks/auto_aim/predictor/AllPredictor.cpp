@@ -1,12 +1,6 @@
 #include "predictor/AllPredictor.h"
 #include "utils/DataProcessFuncs.h"
 
-#ifndef RCLCPP_DEBUG
-// rm2027 is ROS-free. The validated predictor only used RCLCPP_DEBUG for
-// diagnostic printing, so discard those calls without evaluating their args.
-#define RCLCPP_DEBUG(...) do {} while (0)
-#endif
-
 namespace {
 
 constexpr double kRadToDeg = 180.0 / M_PI;
@@ -88,6 +82,14 @@ void drawGeometryPanel(cv::Mat& image, const GeometryDebug& debug)
         "measurement update: " +
             std::to_string(debug.geometry_update_allowed ? 1 : 0),
         cv::format("w: %.3f rad/s  NIS: %.3f", debug.w_rad_s, debug.nis),
+        "joint: " + debug.joint_status +
+            cv::format(" id=%d NIS=%.2f",
+                       debug.joint_second_id, debug.joint_nis),
+        debug.comparison_available
+            ? cv::format("A/B range J-B: %+.3f m  center: %.3f m",
+                         debug.joint_minus_baseline_ground_range_m,
+                         debug.center_separation_m)
+            : std::string("A/B comparison: N/A"),
         "EKF: " + debug.ekf_state,
     };
     for (std::size_t i = 0; i < lines.size(); ++i) {
@@ -112,11 +114,14 @@ void AllPredictor::update_serial_info(float bullet_velocity, float last_pitch_ra
 void AllPredictor::resetTarget()
 {
     if (ekf_target_predictor_) {
-        // TargetManager release is a hard physical-target boundary. Clear the
-        // SuperPower Target so a new vehicle cannot inherit its EKF state.
+        // 释放物理目标时同步清空滤波状态，避免新目标继承旧状态。
         ekf_target_predictor_->clear();
     }
     ekf_target_predictor_.reset();
+    if (baseline_ekf_target_predictor_) {
+        baseline_ekf_target_predictor_->clear();
+    }
+    baseline_ekf_target_predictor_.reset();
     init_r = 200.0F;
     target_active_ = false;
     has_valid_ballistic = false;
@@ -171,14 +176,15 @@ ArmorResult* AllPredictor::selectCurrentMeasurement(
     return measurement;
 }
 
-PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
-                                   cv::Mat& frame,
-                                   double frame_timestamp_s)
+PredictorResult AllPredictor::step(
+    std::vector<ArmorResult>& classifyResults,
+    const std::vector<JointEkfTrackPair>& joint_pairs,
+    cv::Mat& frame,
+    double frame_timestamp_s)
 {
     PredictorResult result;
 
-    // Preserve the real camera image before predictor/debug drawing mutates `frame`.
-    // The dedicated EKF camera window is built only from this image plus SuperPower-EKF data.
+    // 保存未绘制调试信息的相机画面，用于生成 EKF 投影视图。
     const cv::Mat ekf_camera_base_frame = frame.clone();
 
     bool ballistic_valid_flag = false;
@@ -192,10 +198,31 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
 
     ArmorResult* current_measurement =
         selectCurrentMeasurement(classifyResults);
+    ArmorResult* joint_secondary_measurement = nullptr;
     if (current_measurement != nullptr) {
-        result.has_measurement = true;
-        result.measurement_number = current_measurement->number;
-        result.measurement_center = current_measurement->center;
+        if (current_measurement->is_tracked_now) {
+            for (const JointEkfTrackPair& pair : joint_pairs) {
+                if (pair.number != current_measurement->number) continue;
+                int secondary_track_id = -1;
+                if (pair.track_id_a == current_measurement->track_id) {
+                    secondary_track_id = pair.track_id_b;
+                } else if (pair.track_id_b == current_measurement->track_id) {
+                    secondary_track_id = pair.track_id_a;
+                } else {
+                    continue;
+                }
+
+                for (ArmorResult& candidate : classifyResults) {
+                    if (candidate.track_id == secondary_track_id &&
+                        candidate.number == pair.number &&
+                        candidate.is_tracked_now) {
+                        joint_secondary_measurement = &candidate;
+                        break;
+                    }
+                }
+                if (joint_secondary_measurement != nullptr) break;
+            }
+        }
     }
 
     const bool ekf_warmup_complete =
@@ -215,21 +242,11 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
 
             // 将pnp结果转换至静止坐标系以稳定预测
             cv::Point3f rest_frame_pos = rest_frame_ -> pnpToWorldP3f(solve_armor_result.position);
-            // std::vector<float> rest_frame_euler_angles = {
-            //     static_cast<float>(solve_armor_result.ba_global_ypr[0]),
-            //     static_cast<float>(solve_armor_result.ba_global_ypr[1]),
-            //     static_cast<float>(solve_armor_result.ba_global_ypr[2])
-            // };
             std::vector<float> rest_frame_euler_angles = rest_frame_ -> getWorldEulerAnglesFromCam(
                 solve_armor_result.normal_euler_angles[0], solve_armor_result.normal_euler_angles[1], solve_armor_result.normal_euler_angles[2]);
 
             result.yaw_debug.available = true;
-            result.yaw_debug.target_type = static_cast<int>(armor_class);
-            result.yaw_debug.measurement_number = chosen_armor.number;
-            result.yaw_debug.measurement_world_mm = rest_frame_pos;
-            // rm2027 currently has no single-frame yaw-refinement fields.
-            // Use the same world-yaw path already used by its legacy RMM:
-            // camera-frame normal Euler -> RestFrame world yaw.
+            // 没有单帧偏航角优化，沿用原 RMM 的世界系偏航角。
             const double ekf_measurement_yaw =
                 static_cast<double>(rest_frame_euler_angles[0]);
             result.yaw_debug.yaw_raw_rad = ekf_measurement_yaw;
@@ -244,9 +261,6 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                 std::numeric_limits<double>::quiet_NaN();
             result.yaw_debug.refined_valid = false;
             result.yaw_debug.refinement_status = "RM2027_WORLD_YAW";
-            RCLCPP_DEBUG(node->get_logger(), "camera euler angles: yaw=%.2f, pitch=%.2f, roll=%.2f", solve_armor_result.normal_euler_angles[0], solve_armor_result.normal_euler_angles[1], solve_armor_result.normal_euler_angles[2]);
-            RCLCPP_DEBUG(node->get_logger(), "Rest frame pos: x=%.2f, y=%.2f, z=%.2f, yaw=%.2f", rest_frame_pos.x, rest_frame_pos.y, rest_frame_pos.z, rest_frame_euler_angles[0]);
-
             last_rest_frame_pos = rest_frame_pos;
 
             // 提前预测与弹道解算
@@ -254,7 +268,7 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
             total_delay = bullet_time + extra_predict_time;
             last_total_delay_ = total_delay;
 
-            // Direct observation is the safe fallback for Base, Outpost and EKF warm-up.
+            // 基地、前哨站及 EKF 预热阶段直接使用当前观测。
             predicted_armor_pos = rest_frame_pos;
             predicted_aim_pos = predicted_armor_pos;
             fire_flag = true;
@@ -266,10 +280,7 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                 predicted_aim_pos = last_rest_frame_pos;
             }
     } else {
-        // TargetManager owns the target lifetime. During TEMP_LOST an empty
-        // candidate list must keep this predictor alive so the EKF can execute
-        // missUpdate() below; resetTarget() is called only on a state transition
-        // to LOST.
+        // 短暂丢失时保留滤波器并执行纯预测，进入 LOST 后才统一重置。
         result.reset = false;
         result.command_delta_pitch = 0.0;
         result.command_delta_yaw = 0.0;
@@ -282,27 +293,25 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
 
 
 
-    // The copied SuperPower normal branch is the four-armor vehicle model.
-    // Outpost/Base remain on their existing direct-observation path because this
-    // project interface does not yet provide SuperPower ArmorName/ArmorType semantics.
+    // 普通车辆使用 SuperPower 四装甲模型，基地和前哨站保留原直接观测流程。
     if (armor_class != ArmorType::Base && armor_class != ArmorType::Outpost) {
         // ======================== SuperPower EKF ========================
         const double RMM_update_time = frame_timestamp_s;
         bool RMM_updated_flag = false;
-        // Scratch canvas is rebuilt below as the pure SuperPower-EKF top view.
-        cv::Mat RMM_visualize_frame = cv::Mat::zeros(800, 800, CV_8UC3);
+        cv::Mat RMM_visualize_frame;
         cv::Mat EKF_vertical_frame;
         cv::Mat EKF_camera_overlay_frame;
         bool has_tracked_armor_flag = false;
 
-        // Inputs retained only for the pure EKF debug views.
+        // 保存本帧输入，供 EKF 可视化使用。
         bool ekf_has_measurement = false;
         cv::Point3f ekf_measurement_world(0.0f, 0.0f, 0.0f);
+        bool ekf_has_secondary_measurement = false;
+        cv::Point3f ekf_secondary_measurement_world(0.0f, 0.0f, 0.0f);
         bool ekf_has_aim = false;
         cv::Point3f ekf_aim_world(0.0f, 0.0f, 0.0f);
 
-        // Direct observation and EKF update deliberately share the one
-        // tracked-first/confidence-second measurement selected above.
+        // 直接观测与 EKF 共用同一块主装甲板。
         if (current_measurement != nullptr) {
             AimResult solve_armor_result = current_measurement->solve_armor_result;
             cv::Point3f rest_frame_pos =
@@ -324,6 +333,27 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                 RMM_update_time
             });
 
+            std::optional<EKFTargetObservation> joint_secondary_observation;
+            if (joint_secondary_measurement != nullptr) {
+                const AimResult& secondary_solve =
+                    joint_secondary_measurement->solve_armor_result;
+                ekf_secondary_measurement_world =
+                    rest_frame_->pnpToWorldP3f(secondary_solve.position);
+                ekf_has_secondary_measurement = true;
+                const std::vector<float> secondary_world_euler =
+                    rest_frame_->getWorldEulerAnglesFromCam(
+                        secondary_solve.normal_euler_angles[0],
+                        secondary_solve.normal_euler_angles[1],
+                        secondary_solve.normal_euler_angles[2]);
+                joint_secondary_observation = EKFTargetObservation{
+                    ekf_secondary_measurement_world.x,
+                    ekf_secondary_measurement_world.y,
+                    ekf_secondary_measurement_world.z,
+                    static_cast<double>(secondary_world_euler[0]),
+                    RMM_update_time,
+                };
+            }
+
             bool recreate_model = !ekf_target_predictor_;
             if (ekf_target_predictor_) {
                 const EKFTargetState s = ekf_target_predictor_->state();
@@ -339,39 +369,36 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
             if (recreate_model) {
                 ekf_target_predictor_ = std::make_shared<SuperPowerPredictor>(
                     RMM_update_data, init_r, config_file_ptr);
+            } else if (joint_secondary_observation) {
+                ekf_target_predictor_->updatePair(
+                    RMM_update_data, *joint_secondary_observation);
             } else {
                 ekf_target_predictor_->update(RMM_update_data);
+            }
+
+            // 单板基线使用相同主观测和时间戳，仅用于对比可视化。
+            if (comparison_enabled_) {
+                if (!baseline_ekf_target_predictor_) {
+                    baseline_ekf_target_predictor_ =
+                        std::make_shared<SuperPowerPredictor>(
+                            RMM_update_data, init_r, config_file_ptr);
+                } else {
+                    baseline_ekf_target_predictor_->update(RMM_update_data);
+                }
             }
 
             RMM_updated_flag = true;
             has_tracked_armor_flag = true;
 
-            cv::circle(
-                RMM_visualize_frame,
-                cv::Point2f(
-                    400 + rest_frame_pos.x / RMM_visualize_zoom_out_factor,
-                    400 - rest_frame_pos.y / RMM_visualize_zoom_out_factor),
-                8, cv::Scalar(255, 255, 0), 2);
-
-            cv::line(
-                RMM_visualize_frame,
-                cv::Point2f(
-                    400 + rest_frame_pos.x / RMM_visualize_zoom_out_factor,
-                    400 - rest_frame_pos.y / RMM_visualize_zoom_out_factor),
-                cv::Point2f(
-                    400 + rest_frame_pos.x / RMM_visualize_zoom_out_factor +
-                        std::sin(rest_frame_euler_angles[0]) * 500 /
-                            RMM_visualize_zoom_out_factor,
-                    400 - (rest_frame_pos.y / RMM_visualize_zoom_out_factor -
-                        std::cos(rest_frame_euler_angles[0]) * 500 /
-                            RMM_visualize_zoom_out_factor)),
-                cv::Scalar(255, 255, 0), 2);
 
         }
 
         if (!RMM_updated_flag && ekf_target_predictor_) {
-            // SuperPower tracker performs predict/TEMP_LOST here; no pseudo-measurement update.
+            // 丢失观测时只执行状态预测，不构造伪观测。
             ekf_target_predictor_->missUpdate(RMM_update_time);
+            if (comparison_enabled_ && baseline_ekf_target_predictor_) {
+                baseline_ekf_target_predictor_->missUpdate(RMM_update_time);
+            }
         }
 
 
@@ -389,11 +416,6 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
             } else {
                 cv::circle(frame, RMM_pred_now_center_pixel, 10, cv::Scalar(255, 0, 255), 2);
             }
-            if (has_tracked_armor_flag) {
-                cv::circle(RMM_visualize_frame, cv::Point2f(400+RMM_pred_now_data.center_x/RMM_visualize_zoom_out_factor, 400-RMM_pred_now_data.center_y/RMM_visualize_zoom_out_factor), 8, cv::Scalar(0, 255, 0), 2);
-            } else {
-                cv::circle(RMM_visualize_frame, cv::Point2f(400+RMM_pred_now_data.center_x/RMM_visualize_zoom_out_factor, 400-RMM_pred_now_data.center_y/RMM_visualize_zoom_out_factor), 8, cv::Scalar(255, 0, 255), 2);
-            }
             for (int RMM_pred_now_armor_i = 0; RMM_pred_now_armor_i < RMM_pred_now_data.armors.size(); RMM_pred_now_armor_i += 1) {
                 EKFPredictedArmor& RMM_pred_now_armor = RMM_pred_now_data.armors[RMM_pred_now_armor_i];
                 cv::Point3f RMM_pred_now_armor_p3f = rest_frame_ -> worldToPnpP3f({
@@ -403,135 +425,65 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                 });
                 cv::Point2f RMM_pred_now_armor_pixel = armor_solver_->project3DToPixel(RMM_pred_now_armor_p3f);
                 cv::circle(frame, RMM_pred_now_armor_pixel, 6, cv::Scalar(0, 255, 0), 2);
-                // cv::line(frame, RMM_pred_now_center_pixel, RMM_pred_now_armor_pixel, cv::Scalar(0, 255, 0), 2);
-                
-                cv::circle(RMM_visualize_frame, cv::Point2f(400+RMM_pred_now_armor.x/RMM_visualize_zoom_out_factor, 400-RMM_pred_now_armor.y/RMM_visualize_zoom_out_factor), 8, 
-                    cv::Scalar(255 - RMM_pred_now_armor_i * 60, 0, RMM_pred_now_armor_i * 60), 2);
-                // cv::line(RMM_visualize_frame, 
-                //     cv::Point2f(400+RMM_pred_now_data.center_x/RMM_visualize_zoom_out_factor, 400-RMM_pred_now_data.center_y/RMM_visualize_zoom_out_factor), 
-                //     cv::Point2f(400+RMM_pred_now_armor.x/RMM_visualize_zoom_out_factor, 400-RMM_pred_now_armor.y/RMM_visualize_zoom_out_factor), 
-                //     cv::Scalar(255 - RMM_pred_now_armor_i * 60, 0, RMM_pred_now_armor_i * 60), 2);
             }
 
             EKFTargetState RMM_state = ekf_target_predictor_->state();
             EKFTargetDebugState RMM_debug = ekf_target_predictor_->debugState();
-            result.geometry_debug.available = true;
-            result.geometry_debug.target_type = static_cast<int>(armor_class);
-            result.geometry_debug.measurement_number =
-                current_measurement != nullptr ? current_measurement->number : -1;
-            result.geometry_debug.ekf_state = RMM_debug.tracker_state;
-            result.geometry_debug.tracker_state_before =
-                RMM_debug.tracker_state_before;
-            result.geometry_debug.dt_s = RMM_debug.dt_s;
-            result.geometry_debug.r1_m = RMM_debug.r1_m;
-            result.geometry_debug.r2_m = RMM_debug.r2_m;
-            result.geometry_debug.h_m = RMM_debug.h_m;
-            result.geometry_debug.p_r1_m2 = RMM_debug.p_r1_m2;
-            result.geometry_debug.p_r2_m2 = RMM_debug.p_r2_m2;
-            result.geometry_debug.p_h_m2 = RMM_debug.p_h_m2;
-            result.geometry_debug.center_x_m = RMM_state.center_x / 1000.0;
-            result.geometry_debug.center_y_m = RMM_state.center_y / 1000.0;
-            result.geometry_debug.center_z_m = RMM_state.center_z / 1000.0;
-            result.geometry_debug.vx_m_s = RMM_state.center_vx / 1000.0;
-            result.geometry_debug.vy_m_s = RMM_state.center_vy / 1000.0;
-            result.geometry_debug.vz_m_s = RMM_state.center_vz / 1000.0;
-            result.geometry_debug.state_yaw_rad = RMM_state.yaw;
-            result.geometry_debug.w_rad_s = RMM_state.w;
-            result.geometry_debug.nis = RMM_debug.nis >= 0.0
+            const bool comparison_available =
+                comparison_enabled_ && baseline_ekf_target_predictor_ &&
+                baseline_ekf_target_predictor_->hasState();
+            EKFTargetState baseline_state;
+            EKFTargetPrediction baseline_pred_now_data;
+            if (comparison_available) {
+                baseline_state = baseline_ekf_target_predictor_->state();
+                baseline_pred_now_data =
+                    baseline_ekf_target_predictor_->predict(0.0);
+            }
+
+            GeometryDebug& geometry_debug = result.geometry_debug;
+            geometry_debug.available = true;
+            geometry_debug.ekf_state = RMM_debug.tracker_state;
+            geometry_debug.r1_m = RMM_debug.r1_m;
+            geometry_debug.r2_m = RMM_debug.r2_m;
+            geometry_debug.h_m = RMM_debug.h_m;
+            geometry_debug.p_r1_m2 = RMM_debug.p_r1_m2;
+            geometry_debug.p_r2_m2 = RMM_debug.p_r2_m2;
+            geometry_debug.p_h_m2 = RMM_debug.p_h_m2;
+            geometry_debug.w_rad_s = RMM_state.w;
+            geometry_debug.nis = RMM_debug.nis >= 0.0
                 ? RMM_debug.nis
                 : std::numeric_limits<double>::quiet_NaN();
-            result.geometry_debug.matched_armor_id = RMM_debug.matched_id;
-            result.geometry_debug.armor_parity = RMM_debug.armor_parity;
-            result.geometry_debug.armor_switched = RMM_debug.armor_switched;
-            result.geometry_debug.direction_reversal =
-                RMM_debug.direction_reversal;
-            result.geometry_debug.pending_sign_conflict =
-                RMM_debug.pending_sign_conflict;
-            result.geometry_debug.recovered = RMM_debug.recovered;
-            result.geometry_debug.temp_lost_recovery =
-                RMM_debug.temp_lost_recovery;
-            result.geometry_debug.candidate_is_switch =
-                RMM_debug.candidate_is_switch;
-            result.geometry_debug.topology_event = RMM_debug.topology_event;
-            result.geometry_debug.phase_observer_valid =
-                RMM_debug.phase_observer_valid;
-            result.geometry_debug.phase_delta = RMM_debug.phase_delta;
-            result.geometry_debug.phase_w_filtered =
-                RMM_debug.phase_w_filtered;
-            result.geometry_debug.phase_w_instant =
-                RMM_debug.phase_w_instant;
-            result.geometry_debug.best_id = RMM_debug.best_id;
-            result.geometry_debug.measurement_yaw = RMM_debug.measurement_yaw;
-            result.geometry_debug.predicted_yaw = RMM_debug.predicted_yaw;
-            result.geometry_debug.yaw_innovation = RMM_debug.yaw_innovation;
-            result.geometry_debug.measurement = RMM_debug.measurement;
-            result.geometry_debug.pre_predicted = RMM_debug.pre_predicted;
-            result.geometry_debug.post_predicted = RMM_debug.post_predicted;
-            result.geometry_debug.pre_residual = RMM_debug.pre_residual;
-            result.geometry_debug.post_residual = RMM_debug.post_residual;
-            result.geometry_debug.pre_position_error =
-                RMM_debug.pre_position_error;
-            result.geometry_debug.post_position_error =
-                RMM_debug.post_position_error;
-            result.geometry_debug.residual_radial = RMM_debug.residual_radial;
-            result.geometry_debug.residual_tangential =
-                RMM_debug.residual_tangential;
-            result.geometry_debug.nis_xyz = RMM_debug.nis_xyz;
-            result.geometry_debug.nis_yaw = RMM_debug.nis_yaw;
-            result.geometry_debug.yaw_variance_scale =
-                RMM_debug.yaw_variance_scale;
-            result.geometry_debug.p_x_m2 = RMM_debug.p_x_m2;
-            result.geometry_debug.p_vx_m2_s2 = RMM_debug.p_vx_m2_s2;
-            result.geometry_debug.p_y_m2 = RMM_debug.p_y_m2;
-            result.geometry_debug.p_vy_m2_s2 = RMM_debug.p_vy_m2_s2;
-            result.geometry_debug.hypothetical_scaled_nis =
-                RMM_debug.hypothetical_scaled_nis;
-            result.geometry_debug.hypothetical_scaled_nis_contribution =
-                RMM_debug.hypothetical_scaled_nis_contribution;
-            result.geometry_debug.geometry_valid = RMM_debug.geometry_valid;
-            result.geometry_debug.geometry_update_allowed =
-                RMM_debug.geometry_update_allowed;
-            result.geometry_debug.geometry_preserved =
-                RMM_debug.geometry_preserved;
-            result.geometry_debug.updated = RMM_debug.updated;
-            result.geometry_debug.measurement_valid =
-                RMM_debug.measurement_valid;
-            result.geometry_debug.current_armor_id =
-                RMM_debug.current_armor_id;
-            if (result.yaw_debug.available) {
-                result.yaw_debug.ekf_yaw_rad = RMM_state.yaw;
-                result.yaw_debug.ekf_w_rad_s = RMM_state.w;
-                result.yaw_debug.nis = RMM_debug.nis >= 0.0
-                    ? RMM_debug.nis
-                    : std::numeric_limits<double>::quiet_NaN();
-                result.yaw_debug.ekf_state = RMM_debug.tracker_state;
-                result.yaw_debug.matched_armor_id = RMM_debug.matched_id;
-                result.yaw_debug.armor_switched = RMM_debug.armor_switched;
+            geometry_debug.matched_armor_id = RMM_debug.matched_id;
+            geometry_debug.armor_parity = RMM_debug.armor_parity;
+            geometry_debug.armor_switched = RMM_debug.armor_switched;
+            geometry_debug.joint_second_id = RMM_debug.joint_second_id;
+            geometry_debug.joint_nis = RMM_debug.joint_nis;
+            geometry_debug.joint_status = RMM_debug.joint_status;
+            geometry_debug.comparison_available = comparison_available;
+            if (comparison_available) {
+                const double baseline_ground_range_m =
+                    std::hypot(baseline_state.center_x,
+                               baseline_state.center_y) / 1000.0;
+                const double joint_ground_range_m =
+                    std::hypot(RMM_state.center_x,
+                               RMM_state.center_y) / 1000.0;
+                geometry_debug.joint_minus_baseline_ground_range_m =
+                    joint_ground_range_m - baseline_ground_range_m;
+                geometry_debug.center_separation_m =
+                    std::sqrt(
+                        std::pow(RMM_state.center_x -
+                                     baseline_state.center_x, 2.0) +
+                        std::pow(RMM_state.center_y -
+                                     baseline_state.center_y, 2.0) +
+                        std::pow(RMM_state.center_z -
+                                     baseline_state.center_z, 2.0)) /
+                    1000.0;
             }
-            cv::putText(RMM_visualize_frame, 
-                "EKF w:"+std::to_string(RMM_state.w),
-                cv::Point2f(20,80), 
-                cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                cv::Scalar(0, 255, 0), 1, 8, false);
-            cv::putText(RMM_visualize_frame, 
-                cv::format("T:%.3f  dt:%.1f ms", RMM_update_time,
-                           RMM_debug.dt_s * 1000.0),
-                cv::Point2f(20,110), 
-                cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                cv::Scalar(0, 255, 0), 1, 8, false);
-            cv::putText(RMM_visualize_frame,
-                "EKF:"+RMM_debug.tracker_state+
-                " id:"+std::to_string(RMM_debug.matched_id)+
-                " NIS:"+std::to_string(RMM_debug.nis),
-                cv::Point2f(20,320),
-                cv::FONT_HERSHEY_COMPLEX, 0.55,
-                cv::Scalar(0, 255, 255), 1, 8, false);
-            cv::putText(RMM_visualize_frame,
-                "SP assoc: nearest-3 angle+bearing",
-                cv::Point2f(20,345),
-                cv::FONT_HERSHEY_COMPLEX, 0.55,
-                cv::Scalar(0, 255, 255),
-                1, 8, false);
+            geometry_debug.geometry_valid = RMM_debug.geometry_valid;
+            geometry_debug.geometry_update_allowed =
+                RMM_debug.geometry_update_allowed;
+            geometry_debug.geometry_preserved =
+                RMM_debug.geometry_preserved;
             if (ekf_warmup_complete && ekf_target_predictor_->ready()) {
                 EKFTargetPrediction RMM_pred_aim_data = ekf_target_predictor_ -> predict(total_delay);
                 cv::Point2d cam_to_center_vector = {RMM_pred_aim_data.center_x - cam_position[0], RMM_pred_aim_data.center_y - cam_position[1]};
@@ -598,7 +550,7 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                     predicted_aim_pos = predicted_armor_pos;
                 }
                 fire_flag = RMM_fire_result.fire;
-                // Keep aiming continuous, but do not fire unless the SuperPower tracker is stably TRACKING.
+                // 保持瞄准连续，但装甲切换或滤波未稳定时禁止开火。
                 if (!ekf_target_predictor_->ready() ||
                     RMM_debug.armor_switched) {
                     fire_flag = false;
@@ -607,80 +559,8 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                 ekf_has_aim = true;
                 ekf_aim_world = predicted_aim_pos;
                 
-                cv::circle(RMM_visualize_frame, 
-                    cv::Point2f(400+chosen_armor.x/RMM_visualize_zoom_out_factor, 400-chosen_armor.y/RMM_visualize_zoom_out_factor), 8, 
-                    cv::Scalar(0, 0, 255), 2);
-                cv::circle(RMM_visualize_frame, 
-                    cv::Point2f(400+predicted_aim_pos.x/RMM_visualize_zoom_out_factor, 400-predicted_aim_pos.y/RMM_visualize_zoom_out_factor), 8, 
-                    cv::Scalar(0, 255, 255), 2);
-                cv::putText(RMM_visualize_frame, 
-                    "r1:"+std::to_string(RMM_pred_aim_data.r1),
-                    cv::Point2f(20,140), 
-                    cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                    cv::Scalar(0, 255, 0), 1, 8, false);
-                cv::putText(RMM_visualize_frame, 
-                    "r2:"+std::to_string(RMM_pred_aim_data.r2),
-                    cv::Point2f(300,140), 
-                    cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                    cv::Scalar(0, 255, 0), 1, 8, false);
-                cv::putText(RMM_visualize_frame, 
-                    "flip:"+std::to_string(ekf_target_predictor_->debugFlipFlag()),
-                    cv::Point2f(580,140), 
-                    cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                    cv::Scalar(0, 255, 0), 1, 8, false);
-                cv::putText(RMM_visualize_frame, 
-                    "center_z:"+std::to_string(RMM_pred_aim_data.center_z), 
-                    cv::Point2f(20,170), 
-                    cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                    cv::Scalar(0, 255, 0), 1, 8, false);
-                cv::putText(RMM_visualize_frame, 
-                    "alternate_z:"+std::to_string(RMM_pred_aim_data.alternate_z),
-                    cv::Point2f(300,170), 
-                    cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                    cv::Scalar(0, 255, 0), 1, 8, false);
-                cv::putText(RMM_visualize_frame, 
-                    "aim_center:"+std::to_string(RMM_fire_result.aim_center), 
-                    cv::Point2f(20,290), 
-                    cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                    cv::Scalar(0, 255, 0), 1, 8, false);
             }
-            cv::line(RMM_visualize_frame, 
-                cv::Point2f(400, 400), 
-                cv::Point2f(400 - std::sin(total_yaw_rad_delayed_)*1500/RMM_visualize_zoom_out_factor, 
-                            400 - std::cos(total_yaw_rad_delayed_)*1500/RMM_visualize_zoom_out_factor),
-                cv::Scalar(255, 255, 0), 2);
-            cv::putText(RMM_visualize_frame, 
-                "total_yaw:"+std::to_string(total_yaw_rad_delayed_), 
-                cv::Point2f(20,200), 
-                cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                cv::Scalar(0, 255, 0), 1, 8, false);
-            cv::putText(RMM_visualize_frame, 
-                "vx:"+std::to_string(RMM_state.center_vx), 
-                cv::Point2f(20,230), 
-                cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                cv::Scalar(0, 255, 0), 1, 8, false);
-            cv::putText(RMM_visualize_frame, 
-                "vy:"+std::to_string(RMM_state.center_vy), 
-                cv::Point2f(20,260), 
-                cv::FONT_HERSHEY_COMPLEX, 0.7, 
-                cv::Scalar(0, 255, 0), 1, 8, false);
-            cv::line(RMM_visualize_frame, 
-                cv::Point2f(400 + RMM_pred_now_data.center_x/RMM_visualize_zoom_out_factor, 400 - RMM_pred_now_data.center_y/RMM_visualize_zoom_out_factor), 
-                cv::Point2f(400 + (RMM_pred_now_data.center_x/RMM_visualize_zoom_out_factor + RMM_state.center_vx*2/RMM_visualize_zoom_out_factor), 
-                            400 - (RMM_pred_now_data.center_y/RMM_visualize_zoom_out_factor + RMM_state.center_vy*2/RMM_visualize_zoom_out_factor)),
-                cv::Scalar(255, 255, 0), 2);
-            cv::line(RMM_visualize_frame, 
-                cv::Point2f(400+RMM_pred_now_data.center_x/RMM_visualize_zoom_out_factor, 400-RMM_pred_now_data.center_y/RMM_visualize_zoom_out_factor),
-                cv::Point2f(400+RMM_pred_now_data.center_x/RMM_visualize_zoom_out_factor + std::sin(RMM_state.yaw)*1000/RMM_visualize_zoom_out_factor,
-                            400-RMM_pred_now_data.center_y/RMM_visualize_zoom_out_factor + std::cos(RMM_state.yaw)*1000/RMM_visualize_zoom_out_factor),
-                cv::Scalar(255, 0, 255), 2);
-
-            // -----------------------------------------------------------------
-            // Pure SuperPower-EKF visualization.
-            // Semantics intentionally follow standalone v4 drawReplay():
-            // measurement + EKF center + four armor hypotheses + matched-id
-            // highlight + yaw arrows + NIS/residual/phase diagnostics.
-            // -----------------------------------------------------------------
+            // EKF 顶视图、纵向视图与相机投影视图。
             {
                 constexpr int kTopSize = 900;
                 constexpr int kVerticalWidth = 900;
@@ -717,7 +597,7 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                          cv::Point(top_c, kTopSize),
                          cv::Scalar(220, 220, 220), 1);
 
-                // Match standalone replay semantics: world origin is drawn as camera/reference origin.
+                // 世界坐标原点作为相机参考原点。
                 const cv::Point camera_p(top_c, top_c);
                 cv::circle(RMM_visualize_frame, camera_p, 6,
                            cv::Scalar(0, 0, 0), -1, cv::LINE_AA);
@@ -732,10 +612,22 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                                      ekf_measurement_world.y);
                     cv::circle(RMM_visualize_frame, p, 12,
                                cv::Scalar(255, 0, 255), 2, cv::LINE_AA);
-                    cv::putText(RMM_visualize_frame, "real PnP",
+                    cv::putText(RMM_visualize_frame, "PnP-A",
                                 p + cv::Point(10, -10),
                                 cv::FONT_HERSHEY_SIMPLEX, 0.45,
                                 cv::Scalar(180, 0, 180), 1, cv::LINE_AA);
+                }
+                if (RMM_debug.joint_pair_used &&
+                    ekf_has_secondary_measurement) {
+                    const cv::Point p = world_to_top(
+                        ekf_secondary_measurement_world.x,
+                        ekf_secondary_measurement_world.y);
+                    cv::circle(RMM_visualize_frame, p, 12,
+                               cv::Scalar(0, 140, 255), 2, cv::LINE_AA);
+                    cv::putText(RMM_visualize_frame, "PnP-B",
+                                p + cv::Point(10, 18),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                                cv::Scalar(0, 110, 220), 1, cv::LINE_AA);
                 }
 
                 const cv::Point center_p =
@@ -743,25 +635,54 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                                  RMM_pred_now_data.center_y);
                 cv::circle(RMM_visualize_frame, center_p, 6,
                            cv::Scalar(0, 125, 0), -1, cv::LINE_AA);
-                cv::putText(RMM_visualize_frame, "EC",
-                            center_p + cv::Point(8, -8),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.45,
-                            cv::Scalar(0, 125, 0), 1, cv::LINE_AA);
+                cv::putText(
+                    RMM_visualize_frame,
+                    comparison_available ? "JC" : "EC",
+                    center_p + cv::Point(8, -8),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                    cv::Scalar(0, 125, 0), 1, cv::LINE_AA);
+
+                if (comparison_available) {
+                    const cv::Point baseline_center_p =
+                        world_to_top(baseline_pred_now_data.center_x,
+                                     baseline_pred_now_data.center_y);
+                    cv::drawMarker(
+                        RMM_visualize_frame, baseline_center_p,
+                        cv::Scalar(255, 0, 0), cv::MARKER_TILTED_CROSS,
+                        18, 2, cv::LINE_AA);
+                    cv::putText(
+                        RMM_visualize_frame, "BC",
+                        baseline_center_p + cv::Point(8, 16),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                        cv::Scalar(200, 0, 0), 1, cv::LINE_AA);
+                    cv::line(RMM_visualize_frame, baseline_center_p, center_p,
+                             cv::Scalar(120, 120, 120), 1, cv::LINE_AA);
+                }
 
                 for (int i = 0;
                      i < static_cast<int>(RMM_pred_now_data.armors.size()); ++i) {
                     const auto& armor = RMM_pred_now_data.armors[i];
                     const cv::Point p = world_to_top(armor.x, armor.y);
-                    const bool matched = (i == RMM_debug.matched_id);
+                    const bool primary_used = (i == RMM_debug.matched_id);
+                    const bool secondary_used =
+                        RMM_debug.joint_pair_used &&
+                        (i == RMM_debug.joint_second_id);
+                    const bool pnp_used = primary_used || secondary_used;
                     const cv::Scalar color =
-                        matched ? cv::Scalar(0, 205, 0)
-                                : cv::Scalar(0, 125, 0);
+                        primary_used
+                            ? cv::Scalar(0, 205, 0)
+                            : (secondary_used ? cv::Scalar(0, 140, 255)
+                                              : cv::Scalar(0, 125, 0));
+                    const std::string label =
+                        "E" + std::to_string(i) +
+                        (primary_used ? " PnP-A"
+                                      : (secondary_used ? " PnP-B" : ""));
 
                     cv::circle(RMM_visualize_frame, p,
-                               matched ? 9 : 6, color,
-                               matched ? -1 : 2, cv::LINE_AA);
+                               pnp_used ? 9 : 6, color,
+                               pnp_used ? -1 : 2, cv::LINE_AA);
                     cv::putText(RMM_visualize_frame,
-                                "E" + std::to_string(i),
+                                label,
                                 p + cv::Point(8, 14),
                                 cv::FONT_HERSHEY_SIMPLEX, 0.45,
                                 color, 1, cv::LINE_AA);
@@ -872,25 +793,58 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                             cv::Scalar(60, 60, 60), 1, cv::LINE_AA);
 
                 if (ekf_has_measurement) {
-                    cv::circle(
-                        EKF_vertical_frame,
+                    const cv::Point p =
                         world_to_vertical(ekf_measurement_world.y,
-                                          ekf_measurement_world.z),
-                        8, cv::Scalar(255, 0, 255), 2, cv::LINE_AA);
+                                          ekf_measurement_world.z);
+                    cv::circle(EKF_vertical_frame, p, 8,
+                               cv::Scalar(255, 0, 255), 2, cv::LINE_AA);
+                    cv::putText(EKF_vertical_frame, "PnP-A",
+                                p + cv::Point(8, -8),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.42,
+                                cv::Scalar(180, 0, 180), 1, cv::LINE_AA);
+                }
+                if (RMM_debug.joint_pair_used &&
+                    ekf_has_secondary_measurement) {
+                    const cv::Point p = world_to_vertical(
+                        ekf_secondary_measurement_world.y,
+                        ekf_secondary_measurement_world.z);
+                    cv::circle(EKF_vertical_frame, p, 8,
+                               cv::Scalar(0, 140, 255), 2, cv::LINE_AA);
+                    cv::putText(EKF_vertical_frame, "PnP-B",
+                                p + cv::Point(8, 16),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.42,
+                                cv::Scalar(0, 110, 220), 1, cv::LINE_AA);
                 }
 
                 for (int i = 0;
                      i < static_cast<int>(RMM_pred_now_data.armors.size()); ++i) {
                     const auto& armor = RMM_pred_now_data.armors[i];
+                    const bool primary_used = (i == RMM_debug.matched_id);
+                    const bool secondary_used =
+                        RMM_debug.joint_pair_used &&
+                        (i == RMM_debug.joint_second_id);
+                    const bool pnp_used = primary_used || secondary_used;
+                    const cv::Point p =
+                        world_to_vertical(armor.y, armor.z);
                     cv::drawMarker(
-                        EKF_vertical_frame,
-                        world_to_vertical(armor.y, armor.z),
-                        i == RMM_debug.matched_id
+                        EKF_vertical_frame, p,
+                        primary_used
                             ? cv::Scalar(0, 190, 0)
-                            : cv::Scalar(0, 120, 0),
+                            : (secondary_used ? cv::Scalar(0, 140, 255)
+                                              : cv::Scalar(0, 120, 0)),
                         cv::MARKER_CROSS,
-                        i == RMM_debug.matched_id ? 16 : 11,
+                        pnp_used ? 16 : 11,
                         2, cv::LINE_AA);
+                    if (pnp_used) {
+                        cv::putText(
+                            EKF_vertical_frame,
+                            primary_used ? "PnP-A" : "PnP-B",
+                            p + cv::Point(7, -7),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.38,
+                            primary_used ? cv::Scalar(0, 190, 0)
+                                         : cv::Scalar(0, 110, 220),
+                            1, cv::LINE_AA);
+                    }
                 }
 
                 if (ekf_has_aim) {
@@ -903,13 +857,7 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                                cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
                 }
 
-                // -------------------------------------------------------------
-                // Real camera overlay: same SuperPower-EKF geometry as the standalone
-                // replay, projected back through RestFrame + calibrated camera.
-                // No legacy-RMM/fire-control debug primitives are drawn here.
-                // Current E0-E3 come from predict(0); AIM is the selected future
-                // EKF aim point after total-delay prediction.
-                // -------------------------------------------------------------
+                // 将当前 EKF 几何模型投影回真实相机画面。
                 EKF_camera_overlay_frame = ekf_camera_base_frame.clone();
 
                 auto project_world_to_camera = [&](const cv::Point3f& world_mm,
@@ -935,12 +883,36 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                     center_px);
                 if (center_visible) {
                     cv::drawMarker(EKF_camera_overlay_frame, center_px,
-                                   cv::Scalar(255, 128, 0),
+                                   cv::Scalar(0, 180, 0),
                                    cv::MARKER_CROSS, 20, 2, cv::LINE_AA);
-                    cv::putText(EKF_camera_overlay_frame, "EC",
-                                center_px + cv::Point2f(8.0f, -8.0f),
-                                cv::FONT_HERSHEY_SIMPLEX, 0.48,
-                                cv::Scalar(255, 128, 0), 1, cv::LINE_AA);
+                    cv::putText(
+                        EKF_camera_overlay_frame,
+                        comparison_available ? "JC" : "EC",
+                        center_px + cv::Point2f(8.0f, -8.0f),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.48,
+                        cv::Scalar(0, 180, 0), 1, cv::LINE_AA);
+                }
+                if (comparison_available) {
+                    cv::Point2f baseline_center_px;
+                    if (project_world_to_camera(
+                            cv::Point3f(
+                                static_cast<float>(
+                                    baseline_pred_now_data.center_x),
+                                static_cast<float>(
+                                    baseline_pred_now_data.center_y),
+                                static_cast<float>(
+                                    baseline_pred_now_data.center_z)),
+                            baseline_center_px)) {
+                        cv::drawMarker(
+                            EKF_camera_overlay_frame, baseline_center_px,
+                            cv::Scalar(255, 0, 0),
+                            cv::MARKER_TILTED_CROSS, 18, 2, cv::LINE_AA);
+                        cv::putText(
+                            EKF_camera_overlay_frame, "BC",
+                            baseline_center_px + cv::Point2f(8.0f, 16.0f),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.46,
+                            cv::Scalar(255, 0, 0), 1, cv::LINE_AA);
+                    }
                 }
 
                 for (int i = 0;
@@ -955,36 +927,60 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                         continue;
                     }
 
-                    const bool matched = (i == RMM_debug.matched_id);
+                    const bool primary_used = (i == RMM_debug.matched_id);
+                    const bool secondary_used =
+                        RMM_debug.joint_pair_used &&
+                        (i == RMM_debug.joint_second_id);
+                    const bool pnp_used = primary_used || secondary_used;
                     const cv::Scalar armor_color =
-                        matched ? cv::Scalar(0, 255, 0)
-                                : cv::Scalar(0, 170, 0);
+                        primary_used
+                            ? cv::Scalar(0, 255, 0)
+                            : (secondary_used ? cv::Scalar(0, 165, 255)
+                                              : cv::Scalar(0, 170, 0));
+                    const std::string armor_label =
+                        "E" + std::to_string(i) +
+                        (primary_used ? " PnP-A"
+                                      : (secondary_used ? " PnP-B" : ""));
 
                     if (center_visible) {
                         cv::line(EKF_camera_overlay_frame, center_px, armor_px,
                                  cv::Scalar(80, 120, 80), 1, cv::LINE_AA);
                     }
                     cv::circle(EKF_camera_overlay_frame, armor_px,
-                               matched ? 9 : 6, armor_color,
-                               matched ? -1 : 2, cv::LINE_AA);
+                               pnp_used ? 9 : 6, armor_color,
+                               pnp_used ? -1 : 2, cv::LINE_AA);
                     cv::putText(EKF_camera_overlay_frame,
-                                "E" + std::to_string(i),
+                                armor_label,
                                 armor_px + cv::Point2f(8.0f, -8.0f),
                                 cv::FONT_HERSHEY_SIMPLEX, 0.48,
                                 armor_color, 1, cv::LINE_AA);
                 }
 
-                // Measurement is an EKF input, so show it as a small purple ring.
+                // 只标记本帧实际进入 EKF 更新的观测。
                 if (ekf_has_measurement) {
                     cv::Point2f measurement_px;
                     if (project_world_to_camera(ekf_measurement_world,
                                                 measurement_px)) {
                         cv::circle(EKF_camera_overlay_frame, measurement_px, 7,
                                    cv::Scalar(255, 0, 255), 2, cv::LINE_AA);
-                        cv::putText(EKF_camera_overlay_frame, "MEAS",
+                        cv::putText(EKF_camera_overlay_frame, "PnP-A",
                                     measurement_px + cv::Point2f(8.0f, 16.0f),
                                     cv::FONT_HERSHEY_SIMPLEX, 0.42,
                                     cv::Scalar(255, 0, 255), 1, cv::LINE_AA);
+                    }
+                }
+                if (RMM_debug.joint_pair_used &&
+                    ekf_has_secondary_measurement) {
+                    cv::Point2f measurement_px;
+                    if (project_world_to_camera(
+                            ekf_secondary_measurement_world,
+                            measurement_px)) {
+                        cv::circle(EKF_camera_overlay_frame, measurement_px, 7,
+                                   cv::Scalar(0, 165, 255), 2, cv::LINE_AA);
+                        cv::putText(EKF_camera_overlay_frame, "PnP-B",
+                                    measurement_px + cv::Point2f(8.0f, 16.0f),
+                                    cv::FONT_HERSHEY_SIMPLEX, 0.42,
+                                    cv::Scalar(0, 165, 255), 1, cv::LINE_AA);
                     }
                 }
 
@@ -1025,7 +1021,7 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
                     EKF_camera_overlay_frame;
             }
         }
-        // ======================== SuperPower EKF ======================== END
+        // ===================== SuperPower EKF 结束 =====================
     }
 
     drawYawMeasurementPanel(frame, result.yaw_debug);
@@ -1036,8 +1032,6 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
     predicted_armor_pos = rest_frame_ -> worldToPnpP3f(predicted_armor_pos);
 
     // 弹道解算
-    RCLCPP_DEBUG(node->get_logger(), "aim pos: (%.2f, %.2f, %.2f)",
-                predicted_aim_pos.x, predicted_aim_pos.y, predicted_aim_pos.z);
     BallisticInfo ballistic_result = ballistic_solver_ -> calcBallisticAngle(
         predicted_aim_pos.x, 
         predicted_aim_pos.y, 
@@ -1050,11 +1044,8 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
     if (ballistic_result.valid) {
         ballistic_valid_flag = true;
         has_valid_ballistic = true;
-        // RCLCPP_INFO(node->get_logger(), "Target detected, publishing command");
-        // has_valid_target_ = true;
         
         // 发布云台控制命令
-        //serial_communication_->sendData(command_pitch, command_yaw, fire_flag);
         result.reset = false;
         result.command_delta_pitch = ballistic_result.delta_pitch_rad;
         result.command_delta_yaw = ballistic_result.delta_yaw_rad;
@@ -1095,12 +1086,9 @@ PredictorResult AllPredictor::step(std::vector<ArmorResult>& classifyResults,
     } else {
         cv::circle(frame, aim_yaw_pitch_pixel, 8, cv::Scalar(255, 255, 0), 2);
     }
-    RCLCPP_DEBUG(node->get_logger(), "aim center yaw pitch: (%.2f, %.2f)",
-            aim_yaw_pitch.x, aim_yaw_pitch.y);
     
     oscilloscope_common_ -> addDataPoint(((float)(result.fire_flag))/11.0, 1);
     oscilloscope_common_ -> update();
-    // oscilloscope_common_ -> show();
     result.info_images.common_debug_oscilloscope_frame = oscilloscope_common_ -> getDisplay();
 
     const std::string predictor_status =

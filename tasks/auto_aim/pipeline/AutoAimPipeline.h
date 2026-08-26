@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -32,6 +33,16 @@
 #include "utils/PerformanceMonitor.h"
 #include "utils/VisualizerConfig.h"
 
+struct JointEkfPair {
+    int number = -1;
+    int track_id_a = -1;
+    int track_id_b = -1;
+    cv::Point2f center_a;
+    cv::Point2f center_b;
+    int consecutive_frames = 0;
+    bool ready = false;
+};
+
 struct AutoAimVisualizerDebugFrame {
     cv::Mat frame;
     std::chrono::steady_clock::time_point node_start_time;
@@ -46,6 +57,7 @@ struct AutoAimVisualizerDebugFrame {
     std::vector<Light> lights;
     std::vector<Armor> armors;
     std::vector<ArmorResult> solved_results;
+    std::vector<JointEkfPair> joint_ekf_pairs;
     ArmorType::ArmorType armor_type = ArmorType::Hero;
     PredictorType::PredictorType predictor_type = PredictorType::None;
     float mcu_command_yaw = 0.0f;
@@ -56,8 +68,7 @@ struct AutoAimPipelineData {
         cv::Mat frame;
         cv::Mat com_data_visualize_frame;
         std::chrono::steady_clock::time_point frame_timestamp;
-        // Source-frame clock for EKF dt. For video this advances by 1/FPS
-        // even if the pipeline processes faster than real time.
+        // EKF 使用输入帧时间；视频模式按固定帧率递增，不受处理速度影响。
         double source_timestamp_s = 0.0;
         std::chrono::steady_clock::time_point node_start_time;
         std::chrono::steady_clock::time_point performance_start_time;
@@ -82,6 +93,7 @@ struct AutoAimPipelineData {
         std::vector<Light> lights;
         std::vector<Armor> armors;
         std::vector<ArmorResult> classify_results;
+        std::vector<JointEkfPair> joint_ekf_pairs;
         bool used_yolo = false;
     } stage1;
 
@@ -177,6 +189,15 @@ private:
         std::shared_ptr<ArmorClassifier> classifier;
         std::shared_ptr<RP24YOLOWrapper> rp24_yolo_wrapper;
         bool use_rp24_yolo = false;
+        bool joint_ekf_pair_enabled = false;
+        int joint_ekf_pair_min_consecutive_frames = 2;
+
+        struct JointEkfPairState {
+            int track_id_a = -1;
+            int track_id_b = -1;
+            int consecutive_frames = 0;
+        };
+        std::map<int, JointEkfPairState> joint_ekf_pair_states;
 
         std::thread worker;
         std::atomic<bool> idle{true};
@@ -213,6 +234,7 @@ private:
         void drainResults();
         void finishFrame(RP24YOLOWrapper::YoloResult& res, std::chrono::steady_clock::time_point now);
         void flushAll();
+        void runJointEkfPairGate(AutoAimPipelineData& d);
     } stage1_;
 
     struct Stage2 {

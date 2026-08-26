@@ -93,6 +93,11 @@ superpower_ekf:
   max_dt_s: 0.1
   initial_radius_m: 0.38
   armor_num: 4
+  comparison:
+    enabled: false
+  joint_update:
+    enabled: false
+    min_consecutive_frames: 2
 
 # 可视化设置
 visualizer:
@@ -101,6 +106,8 @@ visualizer:
   publish_topics: true # 是否发布调试帧到共享内存（替代 ROS 话题，供 visualizer 进程读取）
   shm_key: 0x0251 # 可视化共享内存 key（与 visualizer 进程保持一致）
   log_video: true # 是否录制视频
+  draw:
+    joint_ekf_pair: true
 
 frame_rate : 45.0 # fps；输入应≤流水线处理能力，否则队列积压拉高端到端延迟（相机模式受链路帧率限制，此值仅作上限）
 serial_delay_time : 30.0 # ms 电控传来的信息相对相机画面快的时间，将对电控信息再延迟这个时间以同步两者

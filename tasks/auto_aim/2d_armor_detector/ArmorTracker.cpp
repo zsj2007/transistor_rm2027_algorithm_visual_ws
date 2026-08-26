@@ -65,7 +65,8 @@ void ArmorTracker::addArmor(Armor& armor, int number, bool is_large, bool not_sl
     // 检测是否正在跟踪当前装甲板
     bool is_tracked = false;
     for (int j = tracked_armors.size() - 1; j >= 0; j -= 1) {
-        if (number == tracked_armors[j].number && 
+        if (!tracked_armors[j].is_tracked_now &&
+            number == tracked_armors[j].number &&
             is_large == tracked_armors[j].is_large &&
             isNearPreviousCenter(armor, now_ground_stable_point, tracked_armors[j])) {
             // 若正在跟踪则更新
@@ -82,7 +83,7 @@ void ArmorTracker::addArmor(Armor& armor, int number, bool is_large, bool not_sl
     }
     // 若未在跟踪则添加至跟踪列表
     if(!is_tracked) {
-        tracked_armors.emplace_back(number, current_time, armor.center, 
+        tracked_armors.emplace_back(next_track_id_++, number, current_time, armor.center,
             armor, confidence, is_large, not_slant, armor_tracker_fit_step, now_ground_stable_point);
     }
 }
@@ -102,8 +103,6 @@ std::vector<ArmorResult> ArmorTracker::afterProcess() {
         } else {
             tracked_armors[i].is_steady_tracked = false;
         }
-
-        // RCLCPP_DEBUG(node->get_logger(), "----------ArmorClassifier Debug Flag----------");
 
         if (tracked_armors[i].is_tracked_now) {
             for (int j = 0; j < tracked_armors[i].prediction_index-1; ++j)
@@ -127,8 +126,9 @@ std::vector<ArmorResult> ArmorTracker::afterProcess() {
     // 输出
     for (size_t i = 0; i < tracked_armors.size(); ++i) {
         if (tracked_armors[i].is_steady_tracked) {
-            results.emplace_back(tracked_armors[i].armor_last_seen, tracked_armors[i].number, tracked_armors[i].confidence, 
-                tracked_armors[i].is_tracked_now, tracked_armors[i].is_large, tracked_armors[i].not_slant, 
+            results.emplace_back(tracked_armors[i].armor_last_seen, tracked_armors[i].number,
+                tracked_armors[i].track_id, tracked_armors[i].confidence,
+                tracked_armors[i].is_tracked_now, tracked_armors[i].is_large, tracked_armors[i].not_slant,
                 tracked_armors[i].predictions, tracked_armors[i].center_predicted, tracked_armors[i].is_steady_tracked);
         }
     }

@@ -25,6 +25,7 @@ struct TrackerConfig {
     double max_dt_s = 0.1;
     double initial_radius_m = 0.2;
     int armor_num = 4;
+    PairUpdateConfig pair_update;
 };
 
 struct TrackerResult {
@@ -41,6 +42,13 @@ struct TrackerResult {
     double position_error = -1.0;
     double angle_error = -1.0;
     Eigen::Vector4d predicted_xyza = Eigen::Vector4d::Zero();
+    bool pair_requested = false;
+    bool pair_used = false;
+    int second_matched_id = -1;
+    double joint_nis = -1.0;
+    double second_position_error = -1.0;
+    double second_angle_error = -1.0;
+    std::string pair_status = "SINGLE";
 };
 
 class Tracker {
@@ -50,6 +58,10 @@ public:
     // 处理一帧可选观测：有观测时预测并更新，无观测时只预测。
     TrackerResult process(const std::optional<ArmorObservation>& observation,
                           double dt);
+    TrackerResult processPair(
+        const ArmorObservation& primary,
+        const ArmorObservation& secondary,
+        double dt);
     void clear();
 
     // SP 进入 LOST 后可能仍在内部缓存 Target，但不会把它提供给下游。
@@ -75,9 +87,11 @@ private:
     std::optional<Target> target_;
 
     // 状态机辅助操作，以及普通四装甲初始协方差的构造。
+    TrackerResult processImpl(
+        const std::optional<ArmorObservation>& primary,
+        const std::optional<ArmorObservation>& secondary,
+        double dt);
     bool setTarget(const ArmorObservation& observation);
-    TargetUpdateDebug updateTarget(const ArmorObservation& observation,
-                                   double dt);
     void predictOnly(double dt);
     void stateMachine(bool found);
     bool badConvergence() const;

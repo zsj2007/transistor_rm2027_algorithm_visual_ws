@@ -80,6 +80,15 @@ struct EKFTargetDebugState {
     double phase_w_filtered = 0.0;
     bool direction_reversal = false;
     bool armor_switched = false;
+    bool joint_pair_requested = false;
+    bool joint_pair_used = false;
+    int joint_second_id = -1;
+    double joint_nis = std::numeric_limits<double>::quiet_NaN();
+    double joint_second_position_error_m =
+        std::numeric_limits<double>::quiet_NaN();
+    double joint_second_angle_error_rad =
+        std::numeric_limits<double>::quiet_NaN();
+    std::string joint_status = "SINGLE";
     bool recovered = false;
     bool phase_w_applied = false;
     bool pending_sign_conflict = false;
@@ -141,6 +150,10 @@ public:
 
     // 输入一条有效装甲观测；由观测时间戳计算 dt 后驱动跟踪器。
     void update(const EKFTargetObservation& observation);
+    // 输入同一时间戳的两块相邻装甲观测。若联合门控失败，底层自动
+    // 联合更新失败时回退为主观测的单板更新。
+    void updatePair(const EKFTargetObservation& primary,
+                    const EKFTargetObservation& secondary);
     // 无观测帧仅做状态预测，并让状态机累计临时丢失帧数。
     void missUpdate(double update_time);
     // 彻底清空跟踪器、时间基准和调试状态。
@@ -165,6 +178,9 @@ private:
     // 重建底层状态机；初始化函数用首条观测建立时间基准和初始 Target。
     void resetTracker();
     void initializeFromObservation(const EKFTargetObservation& observation);
+    void updateImpl(
+        const EKFTargetObservation& primary,
+        const std::optional<EKFTargetObservation>& secondary);
     void warnTimeIssue(const char* reason, double update_time, double dt);
 
     // 从 YAML 读取的 SP 跟踪器配置，以及其持有的滤波状态机。

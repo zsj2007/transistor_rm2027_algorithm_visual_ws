@@ -21,6 +21,7 @@ public:
 
 private:
     struct TrackedArmor {
+        int track_id = -1;
         int number;
         int tracking_count;
         std::chrono::steady_clock::time_point last_seen;
@@ -37,14 +38,16 @@ private:
         int prediction_index;
         cv::Point2f last_ground_stable_point;
 
-        TrackedArmor(int number, std::chrono::steady_clock::time_point seen_time, cv::Point2f center, 
+        TrackedArmor(int track_id, int number, std::chrono::steady_clock::time_point seen_time, cv::Point2f center,
             Armor armor, float confidence, bool is_large, bool not_slant, int fit_step, cv::Point2f ground_stable_point) : 
-        number(number), tracking_count(1), last_seen(seen_time), center_last_seen(center), is_steady_tracked(false),
+        track_id(track_id), number(number), tracking_count(1), last_seen(seen_time), center_last_seen(center), is_steady_tracked(false),
         is_tracked_now(true), armor_last_seen(armor), confidence(confidence), is_large(is_large), not_slant(not_slant),
         predictor(fit_step), center_predicted(center), prediction_index(0), last_ground_stable_point(ground_stable_point) {
             predictor.addPoint(center);
         }
     };
+
+    int next_track_id_ = 0;
 
     std::shared_ptr<YAML::Node> config_file_ptr;
 

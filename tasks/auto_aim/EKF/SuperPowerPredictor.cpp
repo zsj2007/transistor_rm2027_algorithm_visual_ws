@@ -36,6 +36,27 @@ SuperPowerPredictor::SuperPowerPredictor(
                 config_.initial_radius_m = sp["initial_radius_m"].as<double>();
             if (sp["armor_num"])
                 config_.armor_num = sp["armor_num"].as<int>();
+            const YAML::Node joint = sp["joint_update"];
+            if (joint) {
+                if (joint["enabled"])
+                    config_.pair_update.enabled =
+                        joint["enabled"].as<bool>();
+                if (joint["max_joint_nis"])
+                    config_.pair_update.max_joint_nis =
+                        joint["max_joint_nis"].as<double>();
+                if (joint["max_secondary_position_error_m"])
+                    config_.pair_update.max_secondary_position_error_m =
+                        joint["max_secondary_position_error_m"].as<double>();
+                if (joint["max_secondary_angle_error_rad"])
+                    config_.pair_update.max_secondary_angle_error_rad =
+                        joint["max_secondary_angle_error_rad"].as<double>();
+                if (joint["measurement_variance_scale"])
+                    config_.pair_update.measurement_variance_scale =
+                        joint["measurement_variance_scale"].as<double>();
+                if (joint["angle_variance_scale"])
+                    config_.pair_update.angle_variance_scale =
+                        joint["angle_variance_scale"].as<double>();
+            }
         }
     }
 
@@ -53,42 +74,66 @@ SuperPowerPredictor::SuperPowerPredictor(
     }
 }
 
-void SuperPowerPredictor::update(const EKFTargetObservation& observation) {
+void SuperPowerPredictor::update(
+    const EKFTargetObservation& observation) {
+    updateImpl(observation, std::nullopt);
+}
+
+void SuperPowerPredictor::updatePair(
+    const EKFTargetObservation& primary,
+    const EKFTargetObservation& secondary) {
+    updateImpl(primary, secondary);
+}
+
+void SuperPowerPredictor::updateImpl(
+    const EKFTargetObservation& primary,
+    const std::optional<EKFTargetObservation>& secondary) {
     time_discontinuity_ = false;
-    if (!std::isfinite(observation.t)) {
-        last_dt_s_ = observation.t;
-        warnTimeIssue("non-finite timestamp", observation.t, observation.t);
+    if (!std::isfinite(primary.t)) {
+        last_dt_s_ = primary.t;
+        warnTimeIssue("non-finite timestamp", primary.t, primary.t);
         return;
     }
 
-    // 首帧只建目标和时间基准，dt 固定为 0，不做跨帧预测。
     if (!has_update_time_) {
-        initializeFromObservation(observation);
+        initializeFromObservation(primary);
         timestamp_warning_active_ = false;
         return;
     }
 
-    const double dt = observation.t - last_update_time_;
+    const double dt = primary.t - last_update_time_;
     last_dt_s_ = dt;
     if (!std::isfinite(dt)) {
-        warnTimeIssue("non-finite dt", observation.t, dt);
+        warnTimeIssue("non-finite dt", primary.t, dt);
         return;
     }
     if (dt <= 0.0) {
-        warnTimeIssue("duplicate/out-of-order timestamp", observation.t, dt);
+        warnTimeIssue("duplicate/out-of-order timestamp", primary.t, dt);
         return;
     }
 
-    // 不在旧 RMM reset_predictor_time 阈值处预复位；SP 跟踪器自行保持原始的
-    // 0.1 s 大 dt 复位行为。
     if (dt > config_.max_dt_s) {
         time_discontinuity_ = true;
     }
 
-    // 单位/坐标转换只发生在适配器边界，底层 Tracker 始终使用 SP 约定。
-    last_observation_ = toSuperPower(observation);
-    last_result_ = tracker_->process(last_observation_, dt);
-    last_update_time_ = observation.t;
+    last_observation_ = toSuperPower(primary);
+    const bool secondary_valid =
+        secondary.has_value() &&
+        std::isfinite(secondary->t) &&
+        std::abs(secondary->t - primary.t) <= 1e-6;
+    if (secondary_valid && config_.pair_update.enabled) {
+        const sp_ekf::ArmorObservation secondary_sp =
+            toSuperPower(*secondary);
+        last_result_ =
+            tracker_->processPair(*last_observation_, secondary_sp, dt);
+    } else {
+        last_result_ = tracker_->process(last_observation_, dt);
+        if (secondary && !secondary_valid) {
+            last_result_.pair_requested = true;
+            last_result_.pair_status = "TIMESTAMP_MISMATCH";
+        }
+    }
+    last_update_time_ = primary.t;
     timestamp_warning_active_ = false;
 
     if (last_result_.initialized_this_frame) {
@@ -248,6 +293,15 @@ EKFTargetDebugState SuperPowerPredictor::debugState() const {
                               ? last_result_.angle_error * 180.0 / kPi
                               : -1.0;
     debug.armor_switched = last_result_.armor_switched;
+    debug.joint_pair_requested = last_result_.pair_requested;
+    debug.joint_pair_used = last_result_.pair_used;
+    debug.joint_second_id = last_result_.second_matched_id;
+    debug.joint_nis = last_result_.joint_nis;
+    debug.joint_second_position_error_m =
+        last_result_.second_position_error;
+    debug.joint_second_angle_error_rad =
+        last_result_.second_angle_error;
+    debug.joint_status = last_result_.pair_status;
     debug.candidate_is_switch = last_result_.armor_switched;
     debug.topology_event = last_result_.armor_switched;
     debug.geometry_update_allowed = last_result_.updated;

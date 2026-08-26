@@ -38,6 +38,7 @@ namespace visualizer_shm {
 constexpr int kMaxLights = 64;
 constexpr int kMaxArmors = 32;
 constexpr int kMaxSolvedResults = 16;
+constexpr int kMaxJointEkfPairs = 8;
 constexpr int kMaxPredictionsPerArmor = 64;
 constexpr int kMaxEnemyColorLen = 16;
 
@@ -79,6 +80,16 @@ struct ArmorResult {
     bool is_tracked_now = false;
 };
 
+struct JointEkfPair {
+    Point2f center_a;
+    Point2f center_b;
+    int32_t number = -1;
+    int32_t track_id_a = -1;
+    int32_t track_id_b = -1;
+    int32_t consecutive_frames = 0;
+    bool ready = false;
+};
+
 struct RawImage {
     int32_t cols = 0;
     int32_t rows = 0;
@@ -115,6 +126,9 @@ struct DebugData {
 
     ArmorResult solved_results[kMaxSolvedResults];
     uint32_t solved_count = 0;
+
+    JointEkfPair joint_ekf_pairs[kMaxJointEkfPairs];
+    uint32_t joint_ekf_count = 0;
 };
 
 struct Snapshot {

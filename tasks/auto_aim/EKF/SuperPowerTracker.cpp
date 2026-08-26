@@ -9,13 +9,24 @@ Tracker::Tracker(const TrackerConfig& config) : config_(config) {}
 TrackerResult Tracker::process(
     const std::optional<ArmorObservation>& observation,
     double dt) {
-    // 结果保存本帧所有可观察事件，避免调用方直接依赖内部状态机成员。
+    return processImpl(observation, std::nullopt, dt);
+}
+
+TrackerResult Tracker::processPair(
+    const ArmorObservation& primary,
+    const ArmorObservation& secondary,
+    double dt) {
+    return processImpl(primary, secondary, dt);
+}
+
+TrackerResult Tracker::processImpl(
+    const std::optional<ArmorObservation>& primary,
+    const std::optional<ArmorObservation>& secondary,
+    double dt) {
     TrackerResult result;
     result.state_before = state_;
-    result.measurement_valid = observation.has_value();
+    result.measurement_valid = primary.has_value();
 
-    // 与 SP 一致：相机时间间隔过大时强制转 LOST。Target 可以暂存到下一次
-    // setTarget()，但 LOST 状态绝不向下游暴露它。
     if (state_ != TrackerState::LOST && dt > config_.max_dt_s) {
         state_ = TrackerState::LOST;
     }
@@ -23,35 +34,49 @@ TrackerResult Tracker::process(
     bool found = false;
     TargetUpdateDebug update_debug;
 
-    // LOST 仅接受首条观测建目标；其余状态有观测则预测+更新，无观测则仅预测。
     if (state_ == TrackerState::LOST) {
-        if (observation) {
-            found = setTarget(*observation);
+        if (primary) {
+            found = setTarget(*primary);
             result.initialized_this_frame = found;
             result.updated = found;
             if (found) {
                 result.matched_id = 0;
                 result.predicted_xyza = target_->armorXyzaList().front();
+                if (secondary && config_.pair_update.enabled) {
+                    result.pair_requested = true;
+                    result.pair_status = "INITIALIZING";
+                }
             }
         }
-    } else {
-        if (observation) {
-            update_debug = updateTarget(*observation, dt);
-            found = true;
-            result.updated = true;
-            result.matched_id = update_debug.matched_id;
-            result.armor_switched = update_debug.armor_switched;
-            result.nis = update_debug.nis;
-            result.position_error = update_debug.position_error;
-            result.angle_error = update_debug.angle_error;
-            result.predicted_xyza = update_debug.predicted_xyza;
+    } else if (primary) {
+        // 同一帧无论单板还是双板都只做一次时间预测。
+        target_->predict(dt);
+        if (secondary && config_.pair_update.enabled) {
+            update_debug =
+                target_->updatePair(*primary, *secondary, config_.pair_update);
         } else {
-            predictOnly(dt);
-            found = false;
+            update_debug = target_->update(*primary);
         }
+        found = true;
+        result.updated = true;
+        result.matched_id = update_debug.matched_id;
+        result.armor_switched = update_debug.armor_switched;
+        result.nis = update_debug.nis;
+        result.position_error = update_debug.position_error;
+        result.angle_error = update_debug.angle_error;
+        result.predicted_xyza = update_debug.predicted_xyza;
+        result.pair_requested = update_debug.pair_requested;
+        result.pair_used = update_debug.pair_used;
+        result.second_matched_id = update_debug.second_matched_id;
+        result.joint_nis = update_debug.joint_nis;
+        result.second_position_error =
+            update_debug.second_position_error;
+        result.second_angle_error = update_debug.second_angle_error;
+        result.pair_status = update_debug.pair_status;
+    } else {
+        predictOnly(dt);
     }
 
-    // 先按是否发现观测迁移状态，再用几何发散和长期 NIS 失败兜底复位。
     stateMachine(found);
 
     if (state_ != TrackerState::LOST && target_) {
@@ -83,14 +108,6 @@ bool Tracker::setTarget(const ArmorObservation& observation) {
                     config_.armor_num,
                     normalFourArmorP0());
     return true;
-}
-
-TargetUpdateDebug Tracker::updateTarget(
-    const ArmorObservation& observation,
-    double dt) {
-    // 量测更新前必须先对齐到当前时间戳。
-    target_->predict(dt);
-    return target_->update(observation);
 }
 
 void Tracker::predictOnly(double dt) {

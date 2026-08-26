@@ -70,16 +70,13 @@ TargetManagerUpdate TargetManager::update(
     if (last_frame_timestamp_s_.has_value()) {
         const double dt = frame_timestamp_s - *last_frame_timestamp_s_;
         if (!std::isfinite(dt) || dt <= 0.0) {
-            // Do not advance counters, acquire a target, or poison the last
-            // valid source timestamp with a duplicate/out-of-order frame.
+            // 重复帧或乱序帧不更新计数、目标和有效时间戳。
             update.process_current_frame = false;
             return update;
         }
 
         if (dt > max_frame_gap_s_) {
-            // This timestamp is valid and becomes the new continuity anchor,
-            // but the discontinuous frame itself is never used for acquisition
-            // or predictor update. Re-acquisition is allowed on the next frame.
+            // 时间间隔过大时以当前时间重建连续性，下一帧再重新捕获目标。
             last_frame_timestamp_s_ = frame_timestamp_s;
             update.process_current_frame = false;
             if (status_.state != TargetState::LOST) {
@@ -91,8 +88,7 @@ TargetManagerUpdate TargetManager::update(
     last_frame_timestamp_s_ = frame_timestamp_s;
     status_.acquire_policy = acquire_policy;
 
-    // Reserved for a later tactical priority policy. Normal tracking never
-    // reaches SWITCHING, even if another vehicle is closer or has higher confidence.
+    // 预留优先级切换接口，当前跟踪流程不会主动进入 SWITCHING。
     (void)enable_priority_switch_;
 
     if (status_.state == TargetState::LOST) {
@@ -152,9 +148,7 @@ TargetManagerUpdate TargetManager::update(
             break;
 
         case TargetState::SWITCHING:
-            // Active switching remains disabled. If this reserved state is
-            // entered in the future without completing a switch, abort through
-            // the same release/reset event as every other path to LOST.
+            // 主动切换尚未启用，误入该状态时按丢失目标统一释放。
             releaseTarget(update);
             break;
 
@@ -269,8 +263,7 @@ const ArmorResult* TargetManager::selectAcquisition(
         } else if (acquire_policy == ArmorType::Nearest) {
             score = candidate.solve_armor_result.distance;
         } else {
-            // For a requested concrete class, keep the same within-vehicle
-            // tracked-first/confidence-second measurement policy.
+            // 指定具体类别时仍按实时跟踪优先、置信度次之选择观测。
             score = candidate.is_tracked_now
                 ? -1.0e6 - static_cast<double>(candidate.confidence)
                 : -static_cast<double>(candidate.confidence);

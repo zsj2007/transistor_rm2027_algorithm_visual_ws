@@ -395,6 +395,12 @@ vector<Armor> RP24YOLOWrapper::postprocess(const cv::Mat& frame, const vector<Ob
             tools::logger()->debug("Skip degenerate armor: {}", e.what());
             continue;
         }
+        armors.back().raw_light_bar_endpoints = {
+            cv::Point2f(frame_keypoints[0], frame_keypoints[1]),
+            cv::Point2f(frame_keypoints[2], frame_keypoints[3]),
+            cv::Point2f(frame_keypoints[4], frame_keypoints[5]),
+            cv::Point2f(frame_keypoints[6], frame_keypoints[7])
+        };
         if (rp24_classes != nullptr) {
             rp24_classes->push_back(object.label);
         }

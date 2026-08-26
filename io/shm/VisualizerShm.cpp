@@ -47,10 +47,17 @@ void copyImage(const cv::Mat& src, ImageT& dst)
 // 打开（必要时创建）共享内存段；段大小/魔数不匹配时重建
 int createSharedSegment(key_t key, size_t required_size, uint32_t magic)
 {
-    int shm_id = shmget(key, required_size, IPC_CREAT | 0666);
+    int shm_id = shmget(key, 1, 0666);
     if (shm_id == -1) {
-        std::perror("[VisualizerShm] shmget failed");
-        return -1;
+        if (errno != ENOENT) {
+            std::perror("[VisualizerShm] shmget existing segment failed");
+            return -1;
+        }
+        shm_id = shmget(key, required_size, IPC_CREAT | 0666);
+        if (shm_id == -1) {
+            std::perror("[VisualizerShm] shmget create failed");
+            return -1;
+        }
     }
 
     struct shmid_ds info;

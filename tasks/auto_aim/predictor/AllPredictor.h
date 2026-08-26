@@ -19,16 +19,10 @@
 #include "visualizer/DataVisualizer.h"
 #include "utils/SimpleDataFilter.h"
 #include "EKF/SuperPowerPredictor.h"
-#include "predictor/PredictorSwitcher.h"  // PredictorType ABI/UI compatibility only
+#include "predictor/PredictorSwitcher.h"  // 保留 PredictorType 接口兼容
 
 struct YawMeasurementDebug {
     bool available = false;
-    int target_type = -1;
-    int measurement_number = -1;
-    cv::Point3f measurement_world_mm = cv::Point3f(
-        std::numeric_limits<float>::quiet_NaN(),
-        std::numeric_limits<float>::quiet_NaN(),
-        std::numeric_limits<float>::quiet_NaN());
     double yaw_raw_rad = std::numeric_limits<double>::quiet_NaN();
     double yaw_refined_rad = std::numeric_limits<double>::quiet_NaN();
     double yaw_used_rad = std::numeric_limits<double>::quiet_NaN();
@@ -40,86 +34,41 @@ struct YawMeasurementDebug {
     double facing_angle_rad = std::numeric_limits<double>::quiet_NaN();
     bool refined_valid = false;
     std::string refinement_status = "DISABLED";
-    double ekf_yaw_rad = std::numeric_limits<double>::quiet_NaN();
-    double ekf_w_rad_s = std::numeric_limits<double>::quiet_NaN();
-    double nis = std::numeric_limits<double>::quiet_NaN();
-    std::string ekf_state = "N/A";
-    int matched_armor_id = -1;
-    bool armor_switched = false;
-    std::string target_state = "LOST";
 };
 
 struct GeometryDebug {
     bool available = false;
-    int target_type = -1;
-    int measurement_number = -1;
-    std::string target_state = "LOST";
     std::string ekf_state = "LOST";
-    std::string tracker_state_before = "LOST";
-    // Actual timestep consumed by SuperPower tracker for this source frame.
-    double dt_s = std::numeric_limits<double>::quiet_NaN();
     double r1_m = std::numeric_limits<double>::quiet_NaN();
     double r2_m = std::numeric_limits<double>::quiet_NaN();
     double h_m = std::numeric_limits<double>::quiet_NaN();
     double p_r1_m2 = std::numeric_limits<double>::quiet_NaN();
     double p_r2_m2 = std::numeric_limits<double>::quiet_NaN();
     double p_h_m2 = std::numeric_limits<double>::quiet_NaN();
-    double center_x_m = std::numeric_limits<double>::quiet_NaN();
-    double center_y_m = std::numeric_limits<double>::quiet_NaN();
-    double center_z_m = std::numeric_limits<double>::quiet_NaN();
-    double vx_m_s = std::numeric_limits<double>::quiet_NaN();
-    double vy_m_s = std::numeric_limits<double>::quiet_NaN();
-    double vz_m_s = std::numeric_limits<double>::quiet_NaN();
-    double state_yaw_rad = std::numeric_limits<double>::quiet_NaN();
     double w_rad_s = std::numeric_limits<double>::quiet_NaN();
     double nis = std::numeric_limits<double>::quiet_NaN();
     int matched_armor_id = -1;
     int armor_parity = -1;
     bool armor_switched = false;
-    bool direction_reversal = false;
-    bool pending_sign_conflict = false;
-    bool recovered = false;
-    bool temp_lost_recovery = false;
-    bool candidate_is_switch = false;
-    bool topology_event = false;
-    bool phase_observer_valid = false;
-    double phase_delta = 0.0;
-    double phase_w_filtered = 0.0;
-    double phase_w_instant = 0.0;
-    int best_id = -1;
-    double measurement_yaw = std::numeric_limits<double>::quiet_NaN();
-    double predicted_yaw = std::numeric_limits<double>::quiet_NaN();
-    double yaw_innovation = std::numeric_limits<double>::quiet_NaN();
-    Eigen::Matrix<double, 4, 1> measurement =
-        Eigen::Matrix<double, 4, 1>::Constant(
-            std::numeric_limits<double>::quiet_NaN());
-    Eigen::Matrix<double, 4, 1> pre_predicted = measurement;
-    Eigen::Matrix<double, 4, 1> post_predicted = measurement;
-    Eigen::Matrix<double, 3, 1> pre_residual =
-        Eigen::Matrix<double, 3, 1>::Constant(
-            std::numeric_limits<double>::quiet_NaN());
-    Eigen::Matrix<double, 3, 1> post_residual = pre_residual;
-    double pre_position_error = std::numeric_limits<double>::quiet_NaN();
-    double post_position_error = std::numeric_limits<double>::quiet_NaN();
-    double residual_radial = std::numeric_limits<double>::quiet_NaN();
-    double residual_tangential = std::numeric_limits<double>::quiet_NaN();
-    double nis_xyz = std::numeric_limits<double>::quiet_NaN();
-    double nis_yaw = std::numeric_limits<double>::quiet_NaN();
-    double yaw_variance_scale = 1.0;
-    double p_x_m2 = std::numeric_limits<double>::quiet_NaN();
-    double p_vx_m2_s2 = std::numeric_limits<double>::quiet_NaN();
-    double p_y_m2 = std::numeric_limits<double>::quiet_NaN();
-    double p_vy_m2_s2 = std::numeric_limits<double>::quiet_NaN();
-    double hypothetical_scaled_nis = std::numeric_limits<double>::quiet_NaN();
-    Eigen::Matrix<double, 4, 1> hypothetical_scaled_nis_contribution =
-        Eigen::Matrix<double, 4, 1>::Constant(
-            std::numeric_limits<double>::quiet_NaN());
+    int joint_second_id = -1;
+    double joint_nis = std::numeric_limits<double>::quiet_NaN();
+    std::string joint_status = "SINGLE";
+
+    // 同帧单板 EKF 仅用于对比可视化，不参与火控。
+    bool comparison_available = false;
+    double joint_minus_baseline_ground_range_m =
+        std::numeric_limits<double>::quiet_NaN();
+    double center_separation_m =
+        std::numeric_limits<double>::quiet_NaN();
     bool geometry_valid = false;
     bool geometry_update_allowed = false;
     bool geometry_preserved = false;
-    bool updated = false;
-    bool measurement_valid = false;
-    int current_armor_id = -1;
+};
+
+struct JointEkfTrackPair {
+    int number = -1;
+    int track_id_a = -1;
+    int track_id_b = -1;
 };
 
 struct PredictorResult {
@@ -134,16 +83,13 @@ struct PredictorResult {
     float pixel_horizontal_center_distance = 1e10;
     float latest_armor_distance = 1e10;
     bool integrating = false;
-    bool has_measurement = false;
-    int measurement_number = -1;
-    cv::Point2f measurement_center;
     YawMeasurementDebug yaw_debug;
     GeometryDebug geometry_debug;
 
     struct {
-        cv::Mat RMM_visualize_frame;   // SuperPower-EKF top view (legacy field name kept)
-        cv::Mat EKF_vertical_frame;     // SuperPower-EKF y-z view
-        cv::Mat EKF_camera_overlay_frame; // real camera image + SuperPower-EKF overlay
+        cv::Mat RMM_visualize_frame;      // EKF 顶视图
+        cv::Mat EKF_vertical_frame;        // EKF 纵向视图
+        cv::Mat EKF_camera_overlay_frame;  // 相机画面与 EKF 投影
         cv::Mat common_debug_oscilloscope_frame;
     } info_images;
 };
@@ -173,8 +119,6 @@ public:
             bullet_velocity_ = (*config_file_ptr)["bullet_velocity_"].as<float>();
         }
         
-        // yaw_rad_to_x_pixel_ratio = (*config_file_ptr)["yaw_rad_to_x_pixel_ratio"].as<float>(); 
-        // pitch_rad_to_y_pixel_ratio = (*config_file_ptr)["pitch_rad_to_y_pixel_ratio"].as<float>(); 
         const YAML::Node& camera_matrix_Node = (*config_file_ptr)["camera_matrix"];
         yaw_rad_to_x_pixel_ratio = camera_matrix_Node[0][0].as<float>(); 
         pitch_rad_to_y_pixel_ratio = camera_matrix_Node[1][1].as<float>(); 
@@ -206,12 +150,18 @@ public:
 
         extra_predict_time = (*config_file_ptr)["extra_predict_time"].as<float>();
         choose_armor_yaw_bias = M_PI / 180.0 * (*config_file_ptr)["choose_armor_yaw_bias_degree"].as<float>();
-        RMM_visualize_zoom_out_factor = (*config_file_ptr)["RMM_visualize_zoom_out_factor"].as<float>();
-
+        const YAML::Node comparison =
+            (*config_file_ptr)["superpower_ekf"]["comparison"];
+        comparison_enabled_ =
+            comparison && comparison["enabled"] &&
+            comparison["enabled"].as<bool>();
     }
 
-    PredictorResult step(std::vector<ArmorResult>& classifyResults, cv::Mat& frame,
-                         double frame_timestamp_s);
+    PredictorResult step(
+        std::vector<ArmorResult>& classifyResults,
+        const std::vector<JointEkfTrackPair>& joint_pairs,
+        cv::Mat& frame,
+        double frame_timestamp_s);
     void update_serial_info(float bullet_velocity, float last_pitch_rad_delayed, float last_yaw_rad_delayed, float total_yaw_rad_delayed);
     void resetTarget();
     void startTarget();
@@ -236,6 +186,8 @@ private:
     std::shared_ptr<Oscilloscope> oscilloscope_common_;
 
     std::shared_ptr<SuperPowerPredictor> ekf_target_predictor_;
+    std::shared_ptr<SuperPowerPredictor> baseline_ekf_target_predictor_;
+    bool comparison_enabled_ = false;
 
     float bullet_velocity_;
     float last_pitch_rad_delayed_ = 0;
@@ -252,7 +204,7 @@ private:
 
     bool has_valid_ballistic = false;
     
-    float init_r = 200.0;  // mm; SuperPower normal four-armor initialization
+    float init_r = 200.0;  // 普通四装甲初始半径，单位 mm
 
     struct EKF_fire_control_data_t {
         int after_target_change_ceasefire_ms;
@@ -279,7 +231,5 @@ private:
     float choose_armor_yaw_bias;
 
     float extra_predict_time;
-
-    float RMM_visualize_zoom_out_factor;
 
 };

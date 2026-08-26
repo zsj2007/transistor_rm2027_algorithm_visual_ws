@@ -3,6 +3,7 @@
 #define ARMOR_H
 
 #define _USE_MATH_DEFINES // 启用数学常量
+#include <array>
 #include <cmath>
 #include <yaml-cpp/yaml.h>
 #include <opencv2/opencv.hpp>
@@ -99,14 +100,17 @@ struct Armor {
     cv::Point2f computeIntersection(const std::vector<cv::Point2f>& corners);
 
     std::vector<cv::Point2f> light_bar_corners;
+    // 保存 YOLO 输出的左上、左下、右下、右上四个灯条端点。
+    std::array<cv::Point2f, 4> raw_light_bar_endpoints{};
 
     bool is_true_yolo_armor(cv::Mat& frame);
 };
 
 struct ArmorResult {
     Armor armor;              
-    int number;              
-    float confidence;        
+    int number;
+    int track_id;
+    float confidence;
     std::vector<cv::Point2f> corners;  
     cv::Point2f center;
     bool is_tracked_now;
@@ -118,11 +122,11 @@ struct ArmorResult {
 
     AimResult solve_armor_result;
 
-    ArmorResult(const Armor& a, int n, float conf, 
+    ArmorResult(const Armor& a, int n, int tid, float conf,
         bool is_tracked_now, bool is_large, bool not_slant,
         std::vector<cv::Point2f> predictions, cv::Point2f center_predicted, 
         bool is_steady_tracked) 
-        : armor(a), number(n), confidence(conf), corners(a.corners), center(a.center),
+        : armor(a), number(n), track_id(tid), confidence(conf), corners(a.corners), center(a.center),
         is_tracked_now(is_tracked_now), is_large(is_large), not_slant(not_slant),
         predictions(predictions), center_predicted(center_predicted),
         is_steady_tracked(is_steady_tracked) {}

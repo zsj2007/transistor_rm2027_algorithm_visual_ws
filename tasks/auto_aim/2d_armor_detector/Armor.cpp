@@ -39,8 +39,6 @@ void Armor::calculateROI() {
     // 更新corners向量
     corners.clear();
     calculateCorners();
-    // RCLCPP_DEBUG(node->get_logger(), "----------Armor Debug Flag----------");
-
     // 计算ROI
     roi = cv::boundingRect(corners);
 }

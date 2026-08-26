@@ -13,6 +13,7 @@ struct VisualizerConfig {
         bool lights = true;
         bool armors = true;
         bool solved_armors = true;
+        bool joint_ekf_pair = true;
         bool predictions = true;
         bool yaw_curve = true;
         bool rmm = true;
@@ -50,6 +51,7 @@ struct VisualizerConfig {
             config.draw.lights = readBool(draw, "lights", config.draw.lights);
             config.draw.armors = readBool(draw, "armors", config.draw.armors);
             config.draw.solved_armors = readBool(draw, "solved_armors", config.draw.solved_armors);
+            config.draw.joint_ekf_pair = readBool(draw, "joint_ekf_pair", config.draw.joint_ekf_pair);
             config.draw.predictions = readBool(draw, "predictions", config.draw.predictions);
             config.draw.yaw_curve = readBool(draw, "yaw_curve", config.draw.yaw_curve);
             config.draw.rmm = readBool(draw, "rmm", config.draw.rmm);

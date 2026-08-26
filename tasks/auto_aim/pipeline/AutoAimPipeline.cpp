@@ -8,6 +8,7 @@
 #include <cstring>
 #include <ctime>
 #include <iomanip>
+#include <set>
 #include <stdexcept>
 
 namespace {
@@ -79,6 +80,15 @@ AutoAimPipeline::Stage1::Stage1(std::shared_ptr<YAML::Node> config_file_ptr,
         config_file_ptr,
         workspace_path / (*config_file_ptr)["RP24_YOLO_model_relative_path"].as<std::string>(),
         (*config_file_ptr)["RP24_YOLO_device"].as<std::string>());
+    const YAML::Node joint_update =
+        (*config_file_ptr)["superpower_ekf"]["joint_update"];
+    if (joint_update && joint_update["enabled"]) {
+        joint_ekf_pair_enabled = joint_update["enabled"].as<bool>();
+    }
+    if (joint_update && joint_update["min_consecutive_frames"]) {
+        joint_ekf_pair_min_consecutive_frames = std::max(
+            1, joint_update["min_consecutive_frames"].as<int>());
+    }
     // 事件唤醒：YOLO 结果就绪时置位并通知 stage1 线程（替代 5ms 轮询取结果）
     rp24_yolo_wrapper->setResultNotify([this]() {
         {
@@ -87,6 +97,72 @@ AutoAimPipeline::Stage1::Stage1(std::shared_ptr<YAML::Node> config_file_ptr,
         }
         cv.notify_one();
     });
+}
+
+void AutoAimPipeline::Stage1::runJointEkfPairGate(AutoAimPipelineData& d)
+{
+    d.stage1.joint_ekf_pairs.clear();
+
+    if (!joint_ekf_pair_enabled) {
+        joint_ekf_pair_states.clear();
+        return;
+    }
+
+    const std::vector<ArmorResult>& results = d.stage1.classify_results;
+    std::map<int, std::vector<const ArmorResult*>> visible_armors_by_number;
+    for (const ArmorResult& result : results) {
+        if (result.is_tracked_now) {
+            visible_armors_by_number[result.number].push_back(&result);
+        }
+    }
+
+    std::set<int> numbers_with_valid_pair;
+    for (const auto& item : visible_armors_by_number) {
+        const int number = item.first;
+        const std::vector<const ArmorResult*>& armors = item.second;
+
+        // 同类目标恰好同时出现两块实时装甲板时才进入门控。
+        if (armors.size() != 2) {
+            continue;
+        }
+
+        const ArmorResult* armor_a = armors[0];
+        const ArmorResult* armor_b = armors[1];
+        if (armor_a->track_id == armor_b->track_id) {
+            continue;
+        }
+        if (armor_a->track_id > armor_b->track_id) {
+            std::swap(armor_a, armor_b);
+        }
+
+        numbers_with_valid_pair.insert(number);
+        JointEkfPairState& state = joint_ekf_pair_states[number];
+        if (state.track_id_a == armor_a->track_id &&
+            state.track_id_b == armor_b->track_id) {
+            ++state.consecutive_frames;
+        } else {
+            state.track_id_a = armor_a->track_id;
+            state.track_id_b = armor_b->track_id;
+            state.consecutive_frames = 1;
+        }
+
+        JointEkfPair gate_pair;
+        gate_pair.number = number;
+        gate_pair.track_id_a = armor_a->track_id;
+        gate_pair.track_id_b = armor_b->track_id;
+        gate_pair.center_a = armor_a->center;
+        gate_pair.center_b = armor_b->center;
+        gate_pair.consecutive_frames = state.consecutive_frames;
+        gate_pair.ready =
+            state.consecutive_frames >= joint_ekf_pair_min_consecutive_frames;
+        d.stage1.joint_ekf_pairs.emplace_back(gate_pair);
+    }
+
+    for (auto& item : joint_ekf_pair_states) {
+        if (numbers_with_valid_pair.count(item.first) == 0) {
+            item.second = JointEkfPairState{};
+        }
+    }
 }
 
 void AutoAimPipeline::Stage1::start(AutoAimPipelineData& d)
@@ -257,6 +333,7 @@ void AutoAimPipeline::Stage1::finishFrame(RP24YOLOWrapper::YoloResult& res,
         const auto classify_start = PerfClock::now();
         c.d->stage1.classify_results = rp24_yolo_wrapper->classifyAndTrack(
             c.d->stage1.armors, c.res.rp24_classes, c.d->initial.ground_stable_point);
+        runJointEkfPairGate(*c.d);
         if (c.d->initial.performance_profile) {
             c.d->initial.performance_profile->stages["stage1_classify_track"] +=
                 PerformanceMonitor::durationMs(classify_start, PerfClock::now());
@@ -355,7 +432,6 @@ void AutoAimPipeline::Stage2::run()
             d->initial.pitch,
             d->initial.roll);
         rest_frame->updateCamPosition(0, 0, 0);
-
         // 用引用遍历，避免每块装甲板按值拷贝一次 ArmorResult（内含多个 vector/Mat）
         for (ArmorResult& classify_result : d->stage1.classify_results) {
             AimResult solve_armor_result =
@@ -439,9 +515,21 @@ void AutoAimPipeline::Stage3::run()
             d->initial.yaw,
             d->initial.total_yaw);
 
+        std::vector<JointEkfTrackPair> ready_joint_pairs;
+        for (const JointEkfPair& gate_pair :
+             d->stage1.joint_ekf_pairs) {
+            if (!gate_pair.ready) continue;
+            ready_joint_pairs.push_back(JointEkfTrackPair{
+                gate_pair.number,
+                gate_pair.track_id_a,
+                gate_pair.track_id_b,
+            });
+        }
+
         d->stage3.predictor_result =
             predictor_main->step(
                 d->stage2.solved_results,
+                ready_joint_pairs,
                 d->initial.frame,
                 d->initial.source_timestamp_s,
                 ArmorType::Nearest,
@@ -549,6 +637,7 @@ void AutoAimPipeline::Stage4::run()
             debug_frame.lights = d->stage1.lights;
             debug_frame.armors = d->stage1.armors;
             debug_frame.solved_results = d->stage2.solved_results;
+            debug_frame.joint_ekf_pairs = d->stage1.joint_ekf_pairs;
             debug_frame.armor_type = d->stage3.predictor_result.armor_type;
             debug_frame.predictor_type = d->stage3.predictor_result.predictor_type;
             debug_frame.mcu_command_yaw = d->stage3.mcu_command_yaw;
@@ -625,6 +714,20 @@ void AutoAimPipeline::Stage4::run()
                 dst.number = r.number;
                 dst.confidence = r.confidence;
                 dst.is_tracked_now = r.is_tracked_now;
+            }
+
+            debug_data.joint_ekf_count = std::min<size_t>(
+                f.joint_ekf_pairs.size(), visualizer_shm::kMaxJointEkfPairs);
+            for (size_t i = 0; i < debug_data.joint_ekf_count; ++i) {
+                const JointEkfPair& pair = f.joint_ekf_pairs[i];
+                visualizer_shm::JointEkfPair& dst = debug_data.joint_ekf_pairs[i];
+                dst.center_a = visualizer_shm::Point2f{pair.center_a.x, pair.center_a.y};
+                dst.center_b = visualizer_shm::Point2f{pair.center_b.x, pair.center_b.y};
+                dst.number = pair.number;
+                dst.track_id_a = pair.track_id_a;
+                dst.track_id_b = pair.track_id_b;
+                dst.consecutive_frames = pair.consecutive_frames;
+                dst.ready = pair.ready;
             }
 
             shm_writer_->publish(debug_data,

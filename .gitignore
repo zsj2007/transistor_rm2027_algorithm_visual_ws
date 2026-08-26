@@ -1,8 +1,62 @@
-# CMake 编译产物
-build/
+# CMake 编译产物与编译数据库
+/build/
+/cmake-build-*/
+/out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+install_manifest.txt
+compile_commands.json
+*.ninja
+.ninja_deps
+.ninja_log
 
-# 运行日志
-logs/
+# 编译器中间文件与覆盖率数据
+*.o
+*.obj
+*.d
+*.dep
+*.gcda
+*.gcno
+*.profraw
 
-# 临时测试目录（不放仓库）
-测试/
+# 运行日志与相机 SDK 日志
+/logs/
+/MvSdkLog/
+*.log
+*.log.*
+
+# 本地测试、临时文件与生成结果
+/测试/
+/generated/
+/outputs/
+/tmp/
+/temp/
+/query_ro_tmp.cpp
+
+# 本轮 PnP 验证视频，不作为仓库运行资源上传
+/assets/InputVideo/PnPtest_*.mp4
+
+# 编辑器和 IDE 的本地配置
+/.vscode/
+/.idea/
+/.vs/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Python 工具缓存与虚拟环境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 操作系统生成的附属文件
+*:Zone.Identifier
+.DS_Store
+Thumbs.db
+Desktop.ini

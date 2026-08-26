@@ -87,47 +87,17 @@ void Target::predict(double dt) {
 
 TargetUpdateDebug Target::update(const ArmorObservation& armor) {
     TargetUpdateDebug debug;
+    const int id = associateArmor(armor);
     const std::vector<Eigen::Vector4d> xyza_list = armorXyzaList();
-
-    std::vector<std::pair<Eigen::Vector4d, int>> candidates;
-    candidates.reserve(armor_num_);
-    for (int i = 0; i < armor_num_; ++i) {
-        candidates.push_back({xyza_list[static_cast<std::size_t>(i)], i});
-    }
-
-    // 先按距离排序，仅考察最近的三个候选装甲，沿用 SP 的关联策略。
-    std::sort(
-        candidates.begin(), candidates.end(),
-        [](const std::pair<Eigen::Vector4d, int>& lhs,
-           const std::pair<Eigen::Vector4d, int>& rhs) {
-            return lhs.first.head<3>().norm() < rhs.first.head<3>().norm();
-        });
-
-    int id = 0;
-    double min_angle_error = std::numeric_limits<double>::infinity();
-    const Eigen::Vector3d armor_ypd = xyz2ypd(armor.xyz);
-    const int inspect_count = std::min(3, armor_num_);
-    // 角度代价同时考虑装甲外法线和视线 yaw，从而区分相近位置的不同装甲面。
-    for (int i = 0; i < inspect_count; ++i) {
-        const Eigen::Vector4d& xyza = candidates[static_cast<std::size_t>(i)].first;
-        const Eigen::Vector3d ypd = xyz2ypd(xyza.head<3>());
-        const double angle_error =
-            std::abs(limitRad(armor.angle - xyza[3])) +
-            std::abs(limitRad(armor_ypd[0] - ypd[0]));
-        if (std::abs(angle_error) < std::abs(min_angle_error)) {
-            id = candidates[static_cast<std::size_t>(i)].second;
-            min_angle_error = angle_error;
-        }
-    }
 
     debug.matched_id = id;
     debug.armor_switched = (id != last_id_);
     debug.predicted_xyza = xyza_list[static_cast<std::size_t>(id)];
     debug.position_error =
         (armor.xyz - debug.predicted_xyza.head<3>()).norm();
-    debug.angle_error = std::abs(limitRad(armor.angle - debug.predicted_xyza[3]));
+    debug.angle_error =
+        std::abs(limitRad(armor.angle - debug.predicted_xyza[3]));
 
-    // 关联完成后更新切换/收敛统计，并在选中的装甲观测模型上校正 EKF。
     is_switch_ = debug.armor_switched;
     if (is_switch_) ++switch_count_;
     last_id_ = id;
@@ -138,46 +108,275 @@ TargetUpdateDebug Target::update(const ArmorObservation& armor) {
     return debug;
 }
 
-void Target::updateYpda(const ArmorObservation& armor, int id) {
-    // 将笛卡尔位置观测转换为 [yaw, pitch, distance, armor_angle]，以匹配 SP 量测空间。
-    const Eigen::MatrixXd H = hJacobian(ekf_.x, id);
+TargetUpdateDebug Target::updatePair(
+    const ArmorObservation& primary,
+    const ArmorObservation& secondary,
+    const PairUpdateConfig& config) {
+    if (!config.enabled || armor_num_ != 4) {
+        TargetUpdateDebug debug = update(primary);
+        debug.pair_requested = true;
+        debug.pair_status = config.enabled ? "UNSUPPORTED_TOPOLOGY"
+                                           : "DISABLED";
+        return debug;
+    }
 
+    const int primary_id = associateArmor(primary);
+    const std::vector<Eigen::Vector4d> xyza_list = armorXyzaList();
+
+    TargetUpdateDebug pair_debug;
+    pair_debug.pair_requested = true;
+    pair_debug.matched_id = primary_id;
+    pair_debug.armor_switched = (primary_id != last_id_);
+    pair_debug.predicted_xyza =
+        xyza_list[static_cast<std::size_t>(primary_id)];
+    pair_debug.position_error =
+        (primary.xyz - pair_debug.predicted_xyza.head<3>()).norm();
+    pair_debug.angle_error =
+        std::abs(limitRad(primary.angle - pair_debug.predicted_xyza[3]));
+
+    struct Candidate {
+        int id = -1;
+        double nis = std::numeric_limits<double>::infinity();
+        double position_error = std::numeric_limits<double>::infinity();
+        double angle_error = std::numeric_limits<double>::infinity();
+    };
+    Candidate best;
+    bool passed_geometry_gate = false;
+
+    const std::array<int, 2> adjacent_ids{
+        (primary_id + 1) % armor_num_,
+        (primary_id + armor_num_ - 1) % armor_num_,
+    };
+
+    for (const int secondary_id : adjacent_ids) {
+        const Eigen::Vector4d predicted =
+            xyza_list[static_cast<std::size_t>(secondary_id)];
+        const double position_error =
+            (secondary.xyz - predicted.head<3>()).norm();
+        const double angle_error =
+            std::abs(limitRad(secondary.angle - predicted[3]));
+        if (position_error > config.max_secondary_position_error_m ||
+            angle_error > config.max_secondary_angle_error_rad) {
+            continue;
+        }
+        passed_geometry_gate = true;
+
+        Eigen::VectorXd z(8);
+        z.segment<4>(0) = measurementVector(primary);
+        z.segment<4>(4) = measurementVector(secondary);
+
+        Eigen::VectorXd predicted_z(8);
+        predicted_z.segment<4>(0) =
+            predictedMeasurement(ekf_.x, primary_id);
+        predicted_z.segment<4>(4) =
+            predictedMeasurement(ekf_.x, secondary_id);
+
+        Eigen::MatrixXd H = Eigen::MatrixXd::Zero(8, 11);
+        H.block(0, 0, 4, 11) = hJacobian(ekf_.x, primary_id);
+        H.block(4, 0, 4, 11) = hJacobian(ekf_.x, secondary_id);
+
+        Eigen::MatrixXd R = Eigen::MatrixXd::Zero(8, 8);
+        R.block<4, 4>(0, 0) = measurementCovariance(
+            primary, config.measurement_variance_scale,
+            config.angle_variance_scale);
+        R.block<4, 4>(4, 4) = measurementCovariance(
+            secondary, config.measurement_variance_scale,
+            config.angle_variance_scale);
+
+        Eigen::VectorXd residual(8);
+        residual.segment<4>(0) = measurementResidual(
+            z.segment<4>(0), predicted_z.segment<4>(0));
+        residual.segment<4>(4) = measurementResidual(
+            z.segment<4>(4), predicted_z.segment<4>(4));
+
+        const Eigen::MatrixXd innovation =
+            H * ekf_.P * H.transpose() + R;
+        const Eigen::LDLT<Eigen::MatrixXd> ldlt(innovation);
+        if (ldlt.info() != Eigen::Success) continue;
+        const Eigen::VectorXd solved = ldlt.solve(residual);
+        if (ldlt.info() != Eigen::Success || !solved.allFinite()) continue;
+        const double nis = residual.dot(solved);
+        if (!std::isfinite(nis)) continue;
+
+        if (nis < best.nis) {
+            best.id = secondary_id;
+            best.nis = nis;
+            best.position_error = position_error;
+            best.angle_error = angle_error;
+        }
+    }
+
+    if (best.id < 0 || best.nis > config.max_joint_nis) {
+        TargetUpdateDebug debug = update(primary);
+        debug.pair_requested = true;
+        debug.pair_used = false;
+        debug.second_matched_id = best.id;
+        debug.joint_nis = std::isfinite(best.nis) ? best.nis : -1.0;
+        debug.second_position_error =
+            std::isfinite(best.position_error) ? best.position_error : -1.0;
+        debug.second_angle_error =
+            std::isfinite(best.angle_error) ? best.angle_error : -1.0;
+        debug.pair_status = !passed_geometry_gate
+                                ? "SECONDARY_GEOMETRY_GATE"
+                                : (best.id < 0 ? "JOINT_NUMERIC_FAILURE"
+                                               : "JOINT_NIS_GATE");
+        return debug;
+    }
+
+    is_switch_ = pair_debug.armor_switched;
+    if (is_switch_) ++switch_count_;
+    last_id_ = primary_id;
+    ++update_count_;
+
+    updateJointYpda(primary, primary_id, secondary, best.id, config);
+    pair_debug.nis = ekf_.last_nis;
+    pair_debug.pair_used = true;
+    pair_debug.second_matched_id = best.id;
+    pair_debug.joint_nis = best.nis;
+    pair_debug.second_position_error = best.position_error;
+    pair_debug.second_angle_error = best.angle_error;
+    pair_debug.pair_status = "JOINT_OK";
+    return pair_debug;
+}
+
+int Target::associateArmor(const ArmorObservation& armor) const {
+    const std::vector<Eigen::Vector4d> xyza_list = armorXyzaList();
+    std::vector<std::pair<Eigen::Vector4d, int>> candidates;
+    candidates.reserve(static_cast<std::size_t>(armor_num_));
+    for (int i = 0; i < armor_num_; ++i) {
+        candidates.push_back(
+            {xyza_list[static_cast<std::size_t>(i)], i});
+    }
+
+    std::sort(
+        candidates.begin(), candidates.end(),
+        [](const std::pair<Eigen::Vector4d, int>& lhs,
+           const std::pair<Eigen::Vector4d, int>& rhs) {
+            return lhs.first.head<3>().norm() <
+                   rhs.first.head<3>().norm();
+        });
+
+    int id = 0;
+    double min_angle_error = std::numeric_limits<double>::infinity();
+    const Eigen::Vector3d armor_ypd = xyz2ypd(armor.xyz);
+    const int inspect_count = std::min(3, armor_num_);
+    for (int i = 0; i < inspect_count; ++i) {
+        const Eigen::Vector4d& xyza =
+            candidates[static_cast<std::size_t>(i)].first;
+        const Eigen::Vector3d ypd = xyz2ypd(xyza.head<3>());
+        const double angle_error =
+            std::abs(limitRad(armor.angle - xyza[3])) +
+            std::abs(limitRad(armor_ypd[0] - ypd[0]));
+        if (angle_error < min_angle_error) {
+            id = candidates[static_cast<std::size_t>(i)].second;
+            min_angle_error = angle_error;
+        }
+    }
+    return id;
+}
+
+Eigen::Vector4d Target::measurementVector(
+    const ArmorObservation& armor) const {
+    const Eigen::Vector3d ypd = xyz2ypd(armor.xyz);
+    return {ypd[0], ypd[1], ypd[2], armor.angle};
+}
+
+Eigen::Matrix4d Target::measurementCovariance(
+    const ArmorObservation& armor,
+    double variance_scale,
+    double angle_variance_scale) const {
     const double center_yaw = std::atan2(armor.xyz[1], armor.xyz[0]);
     const double delta_angle = limitRad(armor.angle - center_yaw);
     const Eigen::Vector3d ypd = xyz2ypd(armor.xyz);
 
-    // 量测噪声随相对角度和距离自适应放大，保留上游经验模型。
-    Eigen::VectorXd R_diag(4);
-    R_diag << 4e-3,
-              4e-3,
-              std::log(std::abs(delta_angle) + 1.0) + 1.0,
-              std::log(std::abs(ypd[2]) + 1.0) / 200.0 + 9e-2;
-    const Eigen::MatrixXd R = R_diag.asDiagonal();
+    Eigen::Vector4d diagonal;
+    diagonal << 4e-3,
+                4e-3,
+                std::log(std::abs(delta_angle) + 1.0) + 1.0,
+                std::log(std::abs(ypd[2]) + 1.0) / 200.0 + 9e-2;
+    diagonal *= std::max(variance_scale, 1e-6);
+    diagonal[3] *= std::max(angle_variance_scale, 1e-6);
+    return diagonal.asDiagonal();
+}
 
-    auto h = [&](const Eigen::VectorXd& x) -> Eigen::Vector4d {
-        const Eigen::Vector3d xyz = armorXyz(x, id);
-        const Eigen::Vector3d local_ypd = xyz2ypd(xyz);
-        const double angle = limitRad(
-            x[6] + id * 2.0 * kPi / static_cast<double>(armor_num_));
-        return {local_ypd[0], local_ypd[1], local_ypd[2], angle};
+Eigen::Vector4d Target::predictedMeasurement(
+    const Eigen::VectorXd& x,
+    int id) const {
+    const Eigen::Vector3d xyz = armorXyz(x, id);
+    const Eigen::Vector3d ypd = xyz2ypd(xyz);
+    const double angle = limitRad(
+        x[6] + id * 2.0 * kPi / static_cast<double>(armor_num_));
+    return {ypd[0], ypd[1], ypd[2], angle};
+}
+
+Eigen::Vector4d Target::measurementResidual(
+    const Eigen::Vector4d& measured,
+    const Eigen::Vector4d& predicted) {
+    Eigen::Vector4d residual = measured - predicted;
+    residual[0] = limitRad(residual[0]);
+    residual[1] = limitRad(residual[1]);
+    residual[3] = limitRad(residual[3]);
+    return residual;
+}
+
+void Target::updateYpda(const ArmorObservation& armor, int id) {
+    const Eigen::MatrixXd H = hJacobian(ekf_.x, id);
+    const Eigen::Vector4d z = measurementVector(armor);
+    const Eigen::Matrix4d R =
+        measurementCovariance(armor, 1.0, 1.0);
+
+    auto h = [&](const Eigen::VectorXd& x) -> Eigen::VectorXd {
+        return predictedMeasurement(x, id);
     };
-
-    // yaw、pitch 与装甲角均是周期量；残差必须走最短角距离。
     auto z_subtract = [](const Eigen::VectorXd& a,
                          const Eigen::VectorXd& b) -> Eigen::VectorXd {
-        Eigen::VectorXd c = a - b;
-        while (c[0] > kPi) c[0] -= 2.0 * kPi;
-        while (c[0] <= -kPi) c[0] += 2.0 * kPi;
-        while (c[1] > kPi) c[1] -= 2.0 * kPi;
-        while (c[1] <= -kPi) c[1] += 2.0 * kPi;
-        while (c[3] > kPi) c[3] -= 2.0 * kPi;
-        while (c[3] <= -kPi) c[3] += 2.0 * kPi;
-        return c;
+        return measurementResidual(a.head<4>(), b.head<4>());
+    };
+    ekf_.update(z, H, R, h, z_subtract);
+}
+
+void Target::updateJointYpda(
+    const ArmorObservation& primary,
+    int primary_id,
+    const ArmorObservation& secondary,
+    int secondary_id,
+    const PairUpdateConfig& config) {
+    Eigen::VectorXd z(8);
+    z.segment<4>(0) = measurementVector(primary);
+    z.segment<4>(4) = measurementVector(secondary);
+
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(8, 11);
+    H.block(0, 0, 4, 11) = hJacobian(ekf_.x, primary_id);
+    H.block(4, 0, 4, 11) = hJacobian(ekf_.x, secondary_id);
+
+    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(8, 8);
+    R.block<4, 4>(0, 0) = measurementCovariance(
+        primary, config.measurement_variance_scale,
+        config.angle_variance_scale);
+    R.block<4, 4>(4, 4) = measurementCovariance(
+        secondary, config.measurement_variance_scale,
+        config.angle_variance_scale);
+
+    auto h = [&](const Eigen::VectorXd& x) -> Eigen::VectorXd {
+        Eigen::VectorXd predicted(8);
+        predicted.segment<4>(0) =
+            predictedMeasurement(x, primary_id);
+        predicted.segment<4>(4) =
+            predictedMeasurement(x, secondary_id);
+        return predicted;
+    };
+    auto z_subtract = [](const Eigen::VectorXd& a,
+                         const Eigen::VectorXd& b) -> Eigen::VectorXd {
+        Eigen::VectorXd residual(8);
+        residual.segment<4>(0) = measurementResidual(
+            a.segment<4>(0), b.segment<4>(0));
+        residual.segment<4>(4) = measurementResidual(
+            a.segment<4>(4), b.segment<4>(4));
+        return residual;
     };
 
-    Eigen::VectorXd z(4);
-    z << ypd[0], ypd[1], ypd[2], armor.angle;
-    ekf_.update(z, H, R, h, z_subtract);
+    ekf_.update(z, H, R, h, z_subtract,
+                config.max_joint_nis, config.max_joint_nis);
 }
 
 Eigen::VectorXd Target::ekfX() const { return ekf_.x; }
@@ -187,7 +386,7 @@ const ExtendedKalmanFilter& Target::ekf() const { return ekf_; }
 std::vector<Eigen::Vector4d> Target::armorXyzaList() const {
     std::vector<Eigen::Vector4d> result;
     result.reserve(static_cast<std::size_t>(armor_num_));
-    // 按编号生成每块装甲的 [x, y, z, outward-normal angle] 预测值。
+    // 按编号生成每块装甲的三维位置和外法线角预测值。
     for (int i = 0; i < armor_num_; ++i) {
         const double angle = limitRad(
             ekf_.x[6] + i * 2.0 * kPi / static_cast<double>(armor_num_));

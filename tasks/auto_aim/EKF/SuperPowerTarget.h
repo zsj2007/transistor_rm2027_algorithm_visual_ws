@@ -2,6 +2,7 @@
 
 #include <Eigen/Dense>
 #include <array>
+#include <string>
 #include <vector>
 
 #include "EKF/SuperPowerEKF.h"
@@ -16,6 +17,15 @@ struct ArmorObservation {
     double angle = 0.0;
 };
 
+struct PairUpdateConfig {
+    bool enabled = false;
+    double max_joint_nis = 20.09;
+    double max_secondary_position_error_m = 0.45;
+    double max_secondary_angle_error_rad = 0.80;
+    double measurement_variance_scale = 1.5;
+    double angle_variance_scale = 4.0;
+};
+
 struct TargetUpdateDebug {
     // 一次量测更新的关联结果及更新前预测误差，用于诊断而非参与滤波计算。
     int matched_id = -1;
@@ -24,6 +34,13 @@ struct TargetUpdateDebug {
     double position_error = -1.0;
     double angle_error = -1.0;
     double nis = -1.0;
+    bool pair_requested = false;
+    bool pair_used = false;
+    int second_matched_id = -1;
+    double joint_nis = -1.0;
+    double second_position_error = -1.0;
+    double second_angle_error = -1.0;
+    std::string pair_status = "SINGLE";
 };
 
 class Target {
@@ -38,6 +55,12 @@ public:
     void predict(double dt);
     // 为观测选择最匹配的装甲编号，再执行 EKF 量测更新。
     TargetUpdateDebug update(const ArmorObservation& armor);
+    // 同一时间戳的双板联合更新。主板沿用现有关联，副板只枚举相邻拓扑；
+    // 门控失败时在已经完成的本帧预测上回退为主板单观测更新。
+    TargetUpdateDebug updatePair(
+        const ArmorObservation& primary,
+        const ArmorObservation& secondary,
+        const PairUpdateConfig& config);
 
     // 直接暴露内部状态/滤波器仅供适配层导出和健康度检查。
     Eigen::VectorXd ekfX() const;
@@ -64,6 +87,24 @@ private:
 
     // 在 y/p/d/angle 观测空间完成更新；其余函数描述几何观测模型及其雅可比。
     void updateYpda(const ArmorObservation& armor, int id);
+    void updateJointYpda(
+        const ArmorObservation& primary,
+        int primary_id,
+        const ArmorObservation& secondary,
+        int secondary_id,
+        const PairUpdateConfig& config);
+    int associateArmor(const ArmorObservation& armor) const;
+    Eigen::Vector4d measurementVector(const ArmorObservation& armor) const;
+    Eigen::Matrix4d measurementCovariance(
+        const ArmorObservation& armor,
+        double variance_scale,
+        double angle_variance_scale) const;
+    Eigen::Vector4d predictedMeasurement(
+        const Eigen::VectorXd& x,
+        int id) const;
+    static Eigen::Vector4d measurementResidual(
+        const Eigen::Vector4d& measured,
+        const Eigen::Vector4d& predicted);
     Eigen::Vector3d armorXyz(const Eigen::VectorXd& x, int id) const;
     Eigen::MatrixXd hJacobian(const Eigen::VectorXd& x, int id) const;
 

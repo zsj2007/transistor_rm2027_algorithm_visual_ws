@@ -81,3 +81,12 @@ target_link_libraries(tasks
     ${OpenVINO_LIBRARIES}
     ${FFMPEG_LIBRARIES}
 )
+
+if(BUILD_TESTING)
+    add_executable(superpower_joint_update_test
+        auto_aim/EKF/SuperPowerJointUpdateCheck.cpp
+    )
+    target_link_libraries(superpower_joint_update_test PRIVATE tasks)
+    add_test(NAME superpower_joint_update
+             COMMAND superpower_joint_update_test)
+endif()
