@@ -1,0 +1,5 @@
+# Ordinary four-armor vehicle EKF backend.
+# Edit only this line and restart infantry / infantry_debug; rebuilding is not required.
+#   superpower : Tongji SuperPower EKF, preserving xiugai joint-update/CrossLinePnP path
+#   alliance   : NJUST/Alliance 11D lightbar-pixel reprojection EKF
+backend: superpower
