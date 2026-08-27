@@ -4,8 +4,15 @@
 //   1. 滚动帧率（FrameRateCounter，主循环吞吐，窗口默认 60 帧）
 //   2. 流水线结果速率（真正处理完成的帧数/秒）
 //   3. 每 report_interval 帧自动打印各阶段耗时（PerformanceMonitor，stdout 报告）
+//   4. 实时调试窗口 torque_debug：叠加显示
+//        - 自瞄检测/解算出的命令 yaw/pitch（发给 torque 之前）
+//        - TorqueController 的 MPC 输出：yaw 力矩 / yaw 目标角 / pitch 目标与协议值
+//        - 融合状态（fused/mcu/imu valid、yaw_pos、IMU yaw、电控回传角度）
 //
-// 用法：./build/infantry_debug configs/infantry_video.yaml
+// 用法：./build/infantry_debug configs/infantry.yaml [-headless]
+//   - 摄像机模式：configs/infantry.yaml（command_channel=torque 时显示 MPC 输出）
+//   - 视频模式：configs/infantry_video.yaml
+//   - -headless：不创建 OpenCV 窗口（无显示环境时使用）
 
 #include <chrono>
 #include <filesystem>
@@ -28,8 +35,87 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+constexpr double kDeg2Rad = 0.017453292519943295;
+
+// 在画面左上角叠加实时调试面板：
+//   第 1 行：视觉命令角（发给 torque 之前）
+//   第 2~3 行：torque 通道 MPC/下发结果（发给电控之后）
+//   第 4~5 行：融合/电控状态（判断云台是否真的响应）
+void drawTorqueDebugPanel(
+  cv::Mat & img,
+  const io::GimbalCommand & cmd,
+  const io::TorqueDebugState & t,
+  bool has_target,
+  float delta_pitch_deg,
+  float delta_yaw_deg)
+{
+  cv::Mat overlay = img.clone();
+  cv::rectangle(overlay, cv::Point(10, 10), cv::Point(900, 150),
+                cv::Scalar(0, 0, 0), cv::FILLED);
+  cv::addWeighted(overlay, 0.55, img, 0.45, 0.0, img);
+
+  const cv::Point org(20, 34);
+  const int dy = 22;
+  const double fs = 0.52;
+  const cv::Scalar kVision(255, 255, 0);   // 青黄：视觉命令
+  const cv::Scalar kTorque(0, 255, 255);   // 黄：torque 输出
+  const cv::Scalar kFusion(0, 255, 0);     // 绿：融合/反馈
+  const cv::Scalar kGray(180, 180, 180);
+
+  const double cmd_yaw_deg = cmd.yaw / kDeg2Rad;
+  const double cmd_pitch_deg = cmd.pitch / kDeg2Rad;
+
+  // 视觉：自瞄检测/解算出的命令角（发给 torque 之前）
+  cv::putText(
+    img,
+    cv::format("VISION  yaw %+7.2f deg  pitch %+6.2f deg  (dyaw %+5.2f dpitch %+5.2f)  fire=%d aa=%d%s",
+               cmd_yaw_deg, cmd_pitch_deg,
+               delta_yaw_deg, delta_pitch_deg,
+               static_cast<int>(cmd.fire), static_cast<int>(cmd.auto_aim_enable),
+               has_target ? "" : "  NO_TARGET"),
+    org, cv::FONT_HERSHEY_SIMPLEX, fs, kVision, 1, cv::LINE_AA);
+
+  // torque：发给电控之后的 MPC 结果
+  cv::putText(
+    img,
+    cv::format("TORQUE  yaw_torque %+6.3f N*m  yaw_target %+7.2f deg  delayed %+7.2f  yaw_vel %+5.2f rad/s",
+               t.yaw_torque, t.yaw_target_angle_deg, t.delayed_target_deg,
+               t.yaw_target_velocity),
+    cv::Point(org.x, org.y + dy), cv::FONT_HERSHEY_SIMPLEX, fs, kTorque, 1, cv::LINE_AA);
+  cv::putText(
+    img,
+    cv::format("         pitch_target %+6.2f deg  proto %7.3f  mcu_pitch %+6.2f deg",
+               t.pitch_target_deg, t.pitch_proto, t.mcu_pitch_deg),
+    cv::Point(org.x, org.y + 2 * dy), cv::FONT_HERSHEY_SIMPLEX, fs, kTorque, 1, cv::LINE_AA);
+
+  // 融合/反馈：判断云台是否真的响应了命令
+  cv::putText(
+    img,
+    cv::format("FUSION  fused=%d mcu=%d imu=%d  yaw_pos %+7.2f  imu_yaw %+7.2f  mcu_yaw %+7.2f",
+               static_cast<int>(t.fused_valid), static_cast<int>(t.mcu_valid),
+               static_cast<int>(t.imu_valid),
+               t.yaw_pos_deg, t.imu_yaw_deg, t.mcu_yaw_deg),
+    cv::Point(org.x, org.y + 3 * dy), cv::FONT_HERSHEY_SIMPLEX, fs, kFusion, 1, cv::LINE_AA);
+  cv::putText(
+    img,
+    cv::format("         yaw_rate %+5.2f deg/s  integral %+.4f  torque_mode=%d",
+               t.yaw_rate_deg_s, t.integral, static_cast<int>(cmd.yaw_torque_only_mode)),
+    cv::Point(org.x, org.y + 4 * dy), cv::FONT_HERSHEY_SIMPLEX, fs, kFusion, 1, cv::LINE_AA);
+
+  if (!t.valid) {
+    cv::putText(
+      img, "torque channel disabled (serial)", cv::Point(org.x, org.y + 5 * dy),
+      cv::FONT_HERSHEY_SIMPLEX, fs, kGray, 1, cv::LINE_AA);
+  }
+}
+
+}  // namespace
+
 const std::string keys =
   "{help h usage ? | | 输出命令行参数说明}"
+  "{headless | | 不创建 OpenCV 窗口（无显示环境时使用）}"
   "{@config-path   | configs/infantry_video.yaml | 位置参数，yaml配置文件路径}";
 
 int main(int argc, char * argv[])
@@ -114,6 +200,14 @@ int main(int argc, char * argv[])
   double last_send_yaw = 0.0;
   double frame_rate = yaml["frame_rate"] ? yaml["frame_rate"].as<double>() : 80.0;
 
+  // ---- 实时调试面板状态（-headless 时不创建窗口）----
+  const bool headless = cli.has("headless");
+  cv::Mat last_debug_frame;                    // 最近一帧画面（带检测绘制）
+  io::GimbalCommand last_cmd;                  // 最近一次下发的命令
+  bool last_has_target = false;                // 最近一帧是否有目标（reset 之外）
+  float last_delta_pitch_deg = 0.0f;           // 弹道解算的 pitch 增量（度）
+  float last_delta_yaw_deg = 0.0f;             // 弹道解算的 yaw 增量（度）
+
   while (!exiter.exit()) {
     auto loop_start = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
@@ -181,6 +275,17 @@ int main(int argc, char * argv[])
       gimbal.send(cmd);
       watchdog.feed_if_needed();
 
+      // 保存最近一帧画面与命令，供实时面板使用（浅拷贝 + clone，避免改到 SHM 发布帧）
+      if (!result.valid_data.visualizer_debug_frame.frame.empty()) {
+        last_debug_frame = result.valid_data.visualizer_debug_frame.frame.clone();
+      }
+      last_cmd = cmd;
+      last_has_target = !result.valid_data.should_send_reset;
+      last_delta_pitch_deg =
+        result.valid_data.predictor_result.command_delta_pitch / static_cast<float>(kDeg2Rad);
+      last_delta_yaw_deg =
+        result.valid_data.predictor_result.command_delta_yaw / static_cast<float>(kDeg2Rad);
+
       // ⑥ 每帧队列深度（debug）
       tools::logger()->debug(
         "armor_count: {} | Q[in:{} i0:{} i1:{} i2:{} out:{}]",
@@ -200,6 +305,24 @@ int main(int argc, char * argv[])
         "[FPS] input {:.1f} fps ({:.2f} ms/frame) | pipeline {:.1f} fps (valid results) | in_q {}",
         loop_fps.fps(), loop_fps.avg_frame_time() * 1e3, result_fps.fps(),
         result.always_valid_data.queue_input);
+    }
+
+    // ⑧ 实时调试面板：视觉命令角 + torque 通道 MPC 输出（-headless 关闭窗口）
+    if (!headless) {
+      cv::Mat display;
+      if (!last_debug_frame.empty()) {
+        display = last_debug_frame.clone();
+      } else {
+        display = cv::Mat::zeros(720, 1280, CV_8UC3);
+      }
+      drawTorqueDebugPanel(
+        display, last_cmd, gimbal.torqueDebugState(),
+        last_has_target, last_delta_pitch_deg, last_delta_yaw_deg);
+      cv::imshow("torque_debug", display);
+      if (cv::waitKey(1) == 27) {  // ESC 退出
+        tools::logger()->info("ESC pressed, exiting");
+        break;
+      }
     }
 
     // 帧率控制：与原 main_loop_func 一致，输入不超过 frame_rate

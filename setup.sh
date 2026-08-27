@@ -11,6 +11,8 @@
 #   - Sophus / g2o 缺失时从源码自动编译安装到 /usr/local；
 #   - OpenVINO 缺失时提示用 pip 安装（或自行安装 .deb）；
 #   - Ceres + ~/TorqueController 是可选的 torque 通道依赖，缺了也能编译（仅 serial）。
+#   - 编译产物含 infantry / infantry_debug / visualizer；infantry_debug 带实时
+#     torque_debug 面板（视觉命令角 + MPC 力矩 + 融合状态），实车调试用。
 
 set -uo pipefail
 
@@ -185,6 +187,8 @@ info "编译（-j$JOBS）"
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$JOBS"
 ok "编译完成。运行示例:"
-echo "  ./build/infantry configs/infantry.yaml          # 实车"
-echo "  ./build/infantry_debug configs/infantry_video.yaml  # 视频回放"
-echo "  ./build/visualizer configs/infantry_video.yaml      # 可视化"
+echo "  ./build/infantry configs/infantry.yaml                  # 实车（生产入口）"
+echo "  ./build/infantry_debug configs/infantry.yaml            # 实车调试：实时面板 torque_debug（视觉命令角/MPC 力矩/融合状态）"
+echo "  ./build/infantry_debug configs/infantry.yaml -headless  # 无显示环境：不开窗口，数据仍进日志"
+echo "  ./build/infantry_debug configs/infantry_video.yaml      # 视频回放"
+echo "  ./build/visualizer configs/infantry.yaml                # 可视化（与 infantry_debug 并行，不占串口）"

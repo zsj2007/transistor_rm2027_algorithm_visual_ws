@@ -6,7 +6,7 @@
 
 - **新架构**：帧输入统一走 `FramePacket`（像素 + 源帧时间戳 `source_timestamp_s` + `frame_id`），流水线四段异步化，预测器按源帧时间推进；
 - **新预测器**：`TargetManager`（持久目标生命周期管理）+ `SuperPowerEKF`（基于 EKF 的旋转目标预测），RMM 已从构建中移除；
-- **绑核**：每台机器的 CPU 拓扑不同，必须按第 3.4 节自己配置，禁止照抄。
+- **绑核**：每台机器的 CPU 拓扑不同，必须按第 3.5 节自己配置，禁止照抄。
 
 
 
@@ -26,6 +26,10 @@ cmake --build build -j$(nproc)
 
 # 4. 另开一个终端，启动可视化（读同一份配置）
 ./build/visualizer configs/infantry_video.yaml
+
+# 5. 实车调试（摄像机 + torque 通道）：infantry_debug 会额外弹出实时面板
+#    torque_debug（视觉命令角 / MPC 力矩 / 融合状态，详见 3.2 节）
+./build/infantry_debug configs/infantry.yaml
 ```
 
 ## 目录结构
@@ -64,7 +68,7 @@ scripts/   运维脚本：cpu_topology.sh（识别每台机器 P/E 核并给出�
 
 **3. 性能相关配置**
 
-- 每台机器先跑 `./scripts/cpu_topology.sh` 识别 P/E 核，按第 3.4 节配置 `cpu_pinning`；
+- 每台机器先跑 `./scripts/cpu_topology.sh` 识别 P/E 核，按第 3.5 节配置 `cpu_pinning`；
 - `frame_rate` 应 ≤ 流水线处理能力，`in_q` 稳定 0~1 为健康（见第 4 节）；
 - 推理慢/掉帧优先查：绑核是否生效、是否插电、`yolo_infer` 是否热降频。
 
@@ -144,7 +148,7 @@ cmake --build build -j$(nproc)
 | 目标 | 用途 |
 |---|---|
 | `build/infantry` | 实车主程序（相机 + 串口/力矩下发） |
-| `build/infantry_debug` | 调试版：多打印滚动帧率 + 每 90 帧各阶段耗时报告 |
+| `build/infantry_debug` | 调试版：滚动帧率 + 每 90 帧阶段耗时报告 + 实时面板 `torque_debug`（视觉命令角 / MPC 力矩 / 融合状态；`-headless` 关窗口） |
 | `build/visualizer` | 独立可视化进程（共享内存读取，无 ROS） |
 
 ## 3. 运行
@@ -159,7 +163,33 @@ cmake --build build -j$(nproc)
 
 相机网络配置见 [DEPLOY.md](DEPLOY.md)（上位机网卡固定 `192.168.10.25/24`，相机 `192.168.10.10`）。
 
-### 3.2 视频回放调试（无硬件自检）
+### 3.2 实车/回放调试（infantry_debug + 实时面板）
+
+```bash
+./build/infantry_debug configs/infantry.yaml            # 实车：摄像机 + 串口/torque 下发
+./build/infantry_debug configs/infantry.yaml -headless  # 无显示环境：不开窗口，数据仍进日志
+./build/infantry_debug configs/infantry_video.yaml      # 视频回放（无硬件自检）
+```
+
+与 `infantry` 相同的管线，额外多一个实时窗口 **torque_debug**（左上角叠加半透明面板，按 `ESC` 退出窗口）：
+
+| 行 | 内容 |
+|---|---|
+| `VISION`（青黄） | 自瞄检测/弹道解算出的命令 yaw/pitch 及每帧增量（发给 torque 之前）；无目标时标 `NO_TARGET` |
+| `TORQUE`（黄） | TorqueController MPC 输出：`yaw_torque`（N·m）、`yaw_target`（MPC 预测角）、`delayed`（延迟参考）、`yaw_vel`；第二行是 `pitch_target`（视觉 pitch 透传）、`proto`（线性映射后实际上线值）、`mcu_pitch`（电控回传 pitch） |
+| `FUSION`（绿） | `fused/mcu/imu` 三个 valid 标志、融合关节角 `yaw_pos`、`imu_yaw`、电控编码器 `mcu_yaw`、`yaw_rate`、`integral`、`torque_mode` |
+
+用途：
+
+- 一眼对比“视觉命令角”和“电控回传角”，判断云台是否真的响应（排查 torque 通道云台乱晃/不跟手）；
+- 看 `yaw_torque` 是否随目标变化、`yaw_pos`/`mcu_yaw` 是否长期冻结。注意三个 valid 标志是**粘性**的（收到过一包就一直为 1），冻结不代表数据在流，要结合 `yaw_pos`/`mcu_yaw` 是否变化判断；
+- `-headless` 模式下窗口不创建，但数据照常进日志，适合无显示/远程环境。
+
+面板数据来自 `io::GimbalIo::torqueDebugState()`（`TorqueDebugState`）；`command_channel: serial` 时该接口返回 `valid=false`，面板只显示 VISION 行并提示 `torque channel disabled (serial)`。
+
+注意：`infantry_debug` 与 `visualizer` **可以同时运行**（可视化进程只读共享内存、不占串口）；不能同时跑的是第二个占用 MCU/IMU 串口的实例（`infantry` / `infantry_debug` / `torque_manual_test`）。
+
+### 3.3 视频回放调试（无硬件自检）
 
 ```bash
 ./build/infantry_debug configs/infantry_video.yaml
@@ -167,7 +197,7 @@ cmake --build build -j$(nproc)
 
 `infantry_video.yaml` 使用 `assets/InputVideo/infantry_blue.mp4` 循环播放，串口不可用时自动降级继续跑。
 
-### 3.3 可视化（共享内存，无 ROS）
+### 3.4 可视化（共享内存，无 ROS）
 
 ```bash
 # 先跑算法（任意配置），再另开终端：
@@ -200,7 +230,9 @@ cmake --build build -j$(nproc)
 
 可视化进程没启动时，算法侧会自动跳过发布（几乎零开销）；启动后每帧多约 0.5~1ms（Stage4 共享内存拷贝）。不需要调试画面时把 `publish_topics: false` 即可完全关掉。
 
-### 3.4 CPU 绑核（每台机器必须自己配，禁止照抄）
+> 可视化进程不打开任何串口，与 `infantry_debug`（或 `infantry`）并行运行没有冲突；先启动算法侧，再启动可视化侧即可。
+
+### 3.5 CPU 绑核（每台机器必须自己配，禁止照抄）
 
 `configs/*.yaml` 里的 `cpu_pinning:` 是按**本机 CPU 拓扑**写的，换机器必须重新配置，否则会踩两个坑：
 

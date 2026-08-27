@@ -43,6 +43,10 @@ struct TorqueGimbalSender::Impl
   std::unique_ptr<RobotController> rc;
   float default_bullet_velocity_ = 15.0f;
   std::string default_enemy_color_ = "BLUE";
+  double send_pitch_scale_ = 20.523245;   // 与 McuDataPreprocessor::LinearParams 默认一致
+  double send_pitch_offset_ = 0.475049;
+  double last_pitch_target_deg_ = 0.0;    // 最近一次 set() 的 pitch（视觉→torque 的角度）
+  double last_pitch_proto_ = 0.0;         // 线性映射后实际下发的 pitch 协议值
 };
 
 TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
@@ -79,6 +83,8 @@ TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
   if (tc["send_pitch_offset"]) linear_params.send_pitch_offset = tc["send_pitch_offset"].as<double>();
   if (tc["recv_pitch_scale"]) linear_params.recv_pitch_scale = tc["recv_pitch_scale"].as<double>();
   if (tc["recv_pitch_offset"]) linear_params.recv_pitch_offset = tc["recv_pitch_offset"].as<double>();
+  impl_->send_pitch_scale_ = linear_params.send_pitch_scale;
+  impl_->send_pitch_offset_ = linear_params.send_pitch_offset;
 
   impl_->rc = std::make_unique<RobotController>(
     dt_control, mpc_pred_N,
@@ -105,6 +111,9 @@ void TorqueGimbalSender::send(const GimbalCommand & cmd)
 {
   // 直通 McuMpcController::set：后台 100Hz 线程持续取最新目标求解 MPC 并发送。
   // target_yaw 内部自动转换到与 imu_yaw_unwrapped 夹角最小的等效角（多圈语义）。
+  impl_->last_pitch_target_deg_ = cmd.pitch * 180.0 / M_PI;
+  impl_->last_pitch_proto_ =
+    impl_->send_pitch_scale_ * cmd.pitch + impl_->send_pitch_offset_;
   impl_->rc->set(
     cmd.auto_aim_enable,
     cmd.yaw_torque_only_mode,
@@ -139,6 +148,31 @@ io::State TorqueGimbalSender::state() const
   st.to_mcu_delta_yaw = 0.0;
   st.to_mcu_delta_pitch = 0.0;
   return st;
+}
+
+TorqueDebugState TorqueGimbalSender::torqueDebugState() const
+{
+  TorqueDebugState d;
+  d.valid = true;
+  const auto s = impl_->rc->getState();
+  d.fused_valid = s.fused.valid;
+  d.mcu_valid = s.mcu.valid;
+  d.imu_valid = s.imu.valid;
+  d.yaw_pos_deg = s.fused.yaw_pos * 180.0 / M_PI;
+  d.yaw_rate_deg_s = s.fused.yaw_rate * 180.0 / M_PI;
+  d.imu_yaw_deg = s.fused.imu_yaw_unwrapped * 180.0 / M_PI;
+  d.yaw_torque = s.mpc.yaw_torque;
+  d.yaw_target_angle_deg = s.mpc.yaw_target_angle * 180.0 / M_PI;
+  d.yaw_target_velocity = s.mpc.yaw_target_velocity;
+  d.delayed_target_deg = s.mpc.delayed_target * 180.0 / M_PI;
+  d.integral = s.mpc.integral;
+  d.pitch_target_deg = impl_->last_pitch_target_deg_;
+  d.pitch_proto = impl_->last_pitch_proto_;
+  if (s.mcu.valid) {
+    d.mcu_pitch_deg = s.mcu.pitch_angle * 180.0 / M_PI;
+    d.mcu_yaw_deg = s.mcu.yaw_angle * 180.0 / M_PI;
+  }
+  return d;
 }
 #endif  // IO_ENABLE_TORQUE_CONTROLLER
 
@@ -231,6 +265,16 @@ void GimbalIo::recalibrateHeadImu()
     tools::logger()->info(
       "GimbalIo: torque 通道由 TorqueController 内部完成 IMU 融合，跳过 HeadIMU 校准");
   }
+}
+
+TorqueDebugState GimbalIo::torqueDebugState() const
+{
+#if IO_ENABLE_TORQUE_CONTROLLER
+  if (channel_name_ == "torque" && torque_) {
+    return torque_->torqueDebugState();
+  }
+#endif
+  return TorqueDebugState{};
 }
 
 }  // namespace io

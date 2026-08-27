@@ -22,6 +22,29 @@ struct GimbalCommand
   bool integral_enable = false;   // 仅 torque：yaw 力矩积分补偿开关
 };
 
+// torque 通道实时调试信息（serial 通道返回 valid=false）。
+// 供 infantry_debug 之类的调试程序在画面上实时显示：
+//   视觉命令角（发给 torque 之前） + TorqueController 的 MPC 输出（发给电控之后）。
+struct TorqueDebugState
+{
+  bool valid = false;            // 仅 command_channel=torque 时为 true
+  bool fused_valid = false;      // 融合有效（已拿到 MCU yaw 锚定）
+  bool mcu_valid = false;        // MCU 收到过数据（粘性）
+  bool imu_valid = false;        // IMU 收到过数据（粘性）
+  double yaw_pos_deg = 0.0;      // 融合 yaw 关节角（MPC 的 theta）
+  double yaw_rate_deg_s = 0.0;   // 融合 yaw 角速度
+  double imu_yaw_deg = 0.0;      // IMU yaw（解卷绕，度）
+  double yaw_torque = 0.0;       // MPC 计算力矩（N·m，发给电控）
+  double yaw_target_angle_deg = 0.0; // MPC 预测角（发给电控的 yaw 目标）
+  double yaw_target_velocity = 0.0;  // MPC 预测速度（rad/s，发给电控）
+  double delayed_target_deg = 0.0;   // MPC 延迟参考（显示用）
+  double integral = 0.0;         // yaw 力矩积分补偿值
+  double pitch_target_deg = 0.0; // 视觉算出的 pitch 目标（发给 torque 的角度）
+  double pitch_proto = 0.0;      // 线性映射后实际下发的 pitch 协议值
+  double mcu_pitch_deg = 0.0;    // 电控回传 pitch（已标定，imu_euler_pitch 语义）
+  double mcu_yaw_deg = 0.0;      // 电控回传 yaw（编码器多圈角，度）
+};
+
 // 下发通道抽象：serial（原串口角度协议）| torque（TorqueController MPC 力矩协议）
 class GimbalCommandSender
 {
@@ -57,6 +80,9 @@ public:
   // 从 RobotController 融合状态映射为 io::State（torque 通道的传感器输入）
   io::State state() const;
 
+  // torque 通道实时调试信息（MPC 输出 + 融合/电控状态）
+  TorqueDebugState torqueDebugState() const;
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
@@ -85,6 +111,9 @@ public:
 
   // 开启自瞄时校准 HeadIMU：仅 serial 通道有效；torque 通道为空操作
   void recalibrateHeadImu();
+
+  // 实时调试信息：torque 通道返回 MPC/融合状态，serial 通道返回 valid=false
+  TorqueDebugState torqueDebugState() const;
 
 private:
   std::unique_ptr<io::Communication> comm_;        // serial 通道持有
