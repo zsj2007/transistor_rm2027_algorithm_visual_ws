@@ -31,10 +31,21 @@ enum CameraStatus {
     ERROR
 };
 
+struct CameraTimestampConfig {
+    // Use nDevTimeStampHigh/Low and map the camera clock into steady_clock by
+    // latching GevTimestampValue. Unsupported cameras fall back safely.
+    bool use_device_timestamp = true;
+    double fallback_delay_ms = 20.0;
+    double exposure_offset_ratio = 0.5;
+    double resync_interval_s = 5.0;
+    int sync_samples = 8;
+};
+
 class Camera {
 public:
     // GigE相机构造函数
-    Camera(const std::string& deviceIp, const std::string& netIp);
+    Camera(const std::string& deviceIp, const std::string& netIp,
+           const CameraTimestampConfig& timestampConfig = {});
     
     // USB相机构造函数
     Camera(int deviceIndex = 0);
@@ -105,6 +116,16 @@ private:
     // 初始化相机参数
     bool initCameraParams();
     bool initCameraCommonParams();
+
+    // Device-clock synchronization. A command-latch round trip bounds the
+    // camera/host clock offset without including image transport latency.
+    void resetTimestampSync();
+    bool initializeTimestampSync();
+    bool calibrateTimestampSync(int sampleCount, bool smoothUpdate);
+    void maybeResyncTimestampClock();
+    double resolveFrameTimestamp(const MV_FRAME_OUT_INFO_EX& frameInfo,
+                                 std::chrono::steady_clock::time_point arrival,
+                                 bool& fromDevice) const;
     
     // 设置连接时间为当前时间
     void updateReconnectTime() {
@@ -113,6 +134,13 @@ private:
 
     float exposureTime;
     float gain;
+
+    CameraTimestampConfig timestampConfig_;
+    bool timestampSyncValid_ = false;
+    double deviceTimestampFrequencyHz_ = 0.0;
+    double deviceToSteadyOffsetS_ = 0.0;
+    double timestampSyncUncertaintyUs_ = 0.0;
+    std::chrono::steady_clock::time_point lastTimestampSync_{};
 };
 
 #endif // CAMERA_H

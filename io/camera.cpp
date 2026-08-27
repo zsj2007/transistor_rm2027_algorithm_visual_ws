@@ -36,7 +36,21 @@ Camera::Camera(const std::string & config_path)
   } else {
     auto cam_ip = tools::read<std::string>(yaml, "cam_ip");
     auto pc_ip = tools::read<std::string>(yaml, "pc_ip");
-    camera_ = std::make_unique<::Camera>(cam_ip, pc_ip);
+    CameraTimestampConfig timestamp_config;
+    const YAML::Node ts = yaml["camera_timestamp"];
+    if (ts) {
+      if (ts["use_device_timestamp"])
+        timestamp_config.use_device_timestamp = ts["use_device_timestamp"].as<bool>();
+      if (ts["fallback_delay_ms"])
+        timestamp_config.fallback_delay_ms = ts["fallback_delay_ms"].as<double>();
+      if (ts["exposure_offset_ratio"])
+        timestamp_config.exposure_offset_ratio = ts["exposure_offset_ratio"].as<double>();
+      if (ts["resync_interval_s"])
+        timestamp_config.resync_interval_s = ts["resync_interval_s"].as<double>();
+      if (ts["sync_samples"])
+        timestamp_config.sync_samples = ts["sync_samples"].as<int>();
+    }
+    camera_ = std::make_unique<::Camera>(cam_ip, pc_ip, timestamp_config);
     if (yaml["camera_ExposureTime"])
       camera_->setExposureTime(yaml["camera_ExposureTime"].as<float>());
     if (yaml["camera_Gain"]) camera_->setGain(yaml["camera_Gain"].as<float>());
@@ -69,8 +83,10 @@ bool Camera::read(cv::Mat & img,
     source_timestamp_s = g_frame_packet.timestamp_s;
 
     if (camera_) {
-      // Live-camera timestamps are steady_clock epoch seconds recorded at SDK
-      // frame arrival, so reconstruct the same time point for gimbal alignment.
+      // Live-camera timestamps are already in the steady_clock domain. When
+      // supported they represent the Hikrobot device frame time (normally
+      // shifted to exposure midpoint), otherwise the configured arrival-time
+      // fallback has already been applied by the producer.
       const auto d = std::chrono::duration<double>(source_timestamp_s);
       t = std::chrono::steady_clock::time_point(
           std::chrono::duration_cast<std::chrono::steady_clock::duration>(d));
