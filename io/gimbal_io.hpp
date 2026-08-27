@@ -77,8 +77,10 @@ public:
   std::string channelName() const override;
   void send(const GimbalCommand & cmd) override;
 
-  // 从 RobotController 融合状态映射为 io::State（torque 通道的传感器输入）
-  io::State state() const;
+  // 从 RobotController 融合状态映射为 io::State（torque 通道的传感器输入）。
+  // 与 serial 通道一致：按帧时间戳 t 做 serial_delay_time 延迟对齐，
+  // 且仅在融合有效（fused.valid）后返回锚定状态（mcu_yaw_online 门控）。
+  io::State state(std::chrono::steady_clock::time_point t) const;
 
   // torque 通道实时调试信息（MPC 输出 + 融合/电控状态）
   TorqueDebugState torqueDebugState() const;

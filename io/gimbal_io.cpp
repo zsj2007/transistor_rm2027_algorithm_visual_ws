@@ -1,8 +1,13 @@
 #include "io/gimbal_io.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 
 #include "tools/logger.hpp"
 #include "tools/yaml.hpp"
@@ -47,6 +52,24 @@ struct TorqueGimbalSender::Impl
   double send_pitch_offset_ = 0.475049;
   double last_pitch_target_deg_ = 0.0;    // 最近一次 set() 的 pitch（视觉→torque 的角度）
   double last_pitch_proto_ = 0.0;         // 线性映射后实际下发的 pitch 协议值
+
+  // ---- 状态反馈延迟对齐（与 serial 通道 serial_delay_time 语义一致）----
+  // 后台 200Hz 采样融合状态，state(t) 返回“t - serial_delay_time”时刻的样本，
+  // 让弹道解算拿到的姿态与图像同一时刻；仅缓存 fused.valid 后的锚定样本。
+  struct TorqueStateSample
+  {
+    std::chrono::steady_clock::time_point ts;
+    io::State state;
+  };
+  double serial_delay_ms_ = 30.0;
+  mutable std::mutex sample_mtx_;
+  std::deque<TorqueStateSample> samples_;
+  std::atomic<bool> sampler_running_{false};
+  std::thread sampler_thread_;
+
+  ~Impl();
+  void startSampler();
+  io::State snapshotState(const RobotController::State & s) const;
 };
 
 TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
@@ -54,6 +77,11 @@ TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
 {
   auto yaml = tools::load(config_path);
   const YAML::Node tc = yaml["torque_controller"];
+
+  // 与 serial 通道共用同一个延迟对齐配置（ms）
+  if (yaml["serial_delay_time"]) {
+    impl_->serial_delay_ms_ = yaml["serial_delay_time"].as<double>();
+  }
 
   const double dt_control = tc["dt_control"] ? tc["dt_control"].as<double>() : 0.01;
   const int mpc_pred_N = tc["mpc_pred_N"] ? tc["mpc_pred_N"].as<int>() : 20;
@@ -100,6 +128,8 @@ TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
     "max_torque={} max_torque_rate={} Q={} R={} Rd={} max_iter={})",
     dt_control, mpc_pred_N, J, tau_c, b, tau_d,
     max_torque, max_torque_rate, Q, R, Rd, max_iter);
+
+  impl_->startSampler();
 }
 
 std::string TorqueGimbalSender::channelName() const
@@ -123,10 +153,37 @@ void TorqueGimbalSender::send(const GimbalCommand & cmd)
     cmd.integral_enable);
 }
 
-io::State TorqueGimbalSender::state() const
+TorqueGimbalSender::Impl::~Impl()
+{
+  sampler_running_ = false;
+  if (sampler_thread_.joinable()) sampler_thread_.join();
+}
+
+// 后台采样：200Hz 缓存“当前”融合状态，供 state(t) 做延迟对齐
+void TorqueGimbalSender::Impl::startSampler()
+{
+  sampler_running_ = true;
+  sampler_thread_ = std::thread([this] {
+    while (sampler_running_) {
+      const auto start = std::chrono::steady_clock::now();
+      const io::State st = snapshotState(rc->getState());
+      if (st.mcu_yaw_online) {  // 只缓存融合已锚定的有效样本
+        std::lock_guard<std::mutex> lock(sample_mtx_);
+        samples_.push_back(TorqueStateSample{start, st});
+        while (samples_.size() > 1 &&
+               start - samples_.front().ts > std::chrono::seconds(1)) {
+          samples_.pop_front();
+        }
+      }
+      std::this_thread::sleep_until(start + std::chrono::milliseconds(5));
+    }
+  });
+}
+
+// 从 RobotController 状态映射为 io::State；mcu_yaw_online 做 fused.valid 门控
+io::State TorqueGimbalSender::Impl::snapshotState(const RobotController::State & s) const
 {
   io::State st;
-  auto s = impl_->rc->getState();
 
   // 全走 strict 严格反解包：始终有效，缺失数据以 0 参与，不做 valid 分支
   st.pitch_rad = s.strict.imu_euler_pitch;
@@ -139,15 +196,41 @@ io::State TorqueGimbalSender::state() const
     st.bullet_velocity = s.mcu.bullet_velocity;
     st.enemy_color = (s.mcu.color == 1) ? "BLUE" : "RED";
   } else {
-    st.bullet_velocity = impl_->default_bullet_velocity_;
-    st.enemy_color = impl_->default_enemy_color_;
+    st.bullet_velocity = default_bullet_velocity_;
+    st.enemy_color = default_enemy_color_;
   }
 
   st.use_head_imu = false;          // 融合由 TorqueController 内部完成
-  st.mcu_yaw_online = true;  // 首包到达前视为离线
+  st.mcu_yaw_online = s.fused.valid;  // 有效性门控：融合未锚定（无 MCU yaw）视为离线
   st.to_mcu_delta_yaw = 0.0;
   st.to_mcu_delta_pitch = 0.0;
   return st;
+}
+
+io::State TorqueGimbalSender::state(std::chrono::steady_clock::time_point t) const
+{
+  const auto s = impl_->rc->getState();
+  const io::State fresh = impl_->snapshotState(s);
+
+  std::lock_guard<std::mutex> lock(impl_->sample_mtx_);
+  if (impl_->samples_.empty()) {
+    // 融合未锚定：返回当前映射（mcu_yaw_online=false，下游据此判定未就绪）
+    return fresh;
+  }
+
+  // 延迟对齐：返回 t - serial_delay_time 时刻最接近的样本（与 serial 通道一致）
+  const auto target =
+    t - std::chrono::milliseconds(static_cast<int64_t>(impl_->serial_delay_ms_));
+  const TorqueGimbalSender::Impl::TorqueStateSample * best = nullptr;
+  auto best_dist = std::chrono::steady_clock::duration::max();
+  for (const auto & smp : impl_->samples_) {
+    const auto dist = (smp.ts > target) ? (smp.ts - target) : (target - smp.ts);
+    if (dist < best_dist) {
+      best_dist = dist;
+      best = &smp;
+    }
+  }
+  return best ? best->state : fresh;
 }
 
 TorqueDebugState TorqueGimbalSender::torqueDebugState() const
@@ -218,7 +301,7 @@ io::State GimbalIo::stateAt(std::chrono::steady_clock::time_point t)
 {
 #if IO_ENABLE_TORQUE_CONTROLLER
   if (channel_name_ == "torque") {
-    return torque_->state();
+    return torque_->state(t);
   }
 #endif
   return comm_->state_at(t);
