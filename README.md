@@ -187,7 +187,7 @@ cmake --build build -j$(nproc)
 
 面板数据来自 `io::GimbalIo::torqueDebugState()`（`TorqueDebugState`）；`command_channel: serial` 时该接口返回 `valid=false`，面板只显示 VISION 行并提示 `torque channel disabled (serial)`。
 
-torque 通道的传感器状态（`GimbalIo::stateAt(t)`）与 serial 通道一致：按 `serial_delay_time`（默认 30ms）对帧时间戳 `t` 做**延迟对齐**，且仅在融合有效（`fused.valid`）后返回锚定状态（`mcu_yaw_online` 门控），避免弹道解算用“未锚定的 yaw”配旧图像。
+torque 通道的传感器状态（`GimbalIo::stateAt(t)`）与 serial 通道语义一致：按 `torque_controller.state_delay_ms`（默认 20ms，torque 通道独立配置）对帧时间戳 `t` 做**延迟对齐**，且仅在融合有效（`fused.valid`）后返回锚定状态（`mcu_yaw_online` 门控），避免弹道解算用“未锚定的 yaw”配旧图像。serial 通道仍用顶层的 `serial_delay_time`（30ms）。
 
 注意：`infantry_debug` 与 `visualizer` **可以同时运行**（可视化进程只读共享内存、不占串口）；不能同时跑的是第二个占用 MCU/IMU 串口的实例（`infantry` / `infantry_debug` / `torque_manual_test`）。
 

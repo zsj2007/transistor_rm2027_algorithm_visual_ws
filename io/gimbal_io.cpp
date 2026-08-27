@@ -53,15 +53,15 @@ struct TorqueGimbalSender::Impl
   double last_pitch_target_deg_ = 0.0;    // 最近一次 set() 的 pitch（视觉→torque 的角度）
   double last_pitch_proto_ = 0.0;         // 线性映射后实际下发的 pitch 协议值
 
-  // ---- 状态反馈延迟对齐（与 serial 通道 serial_delay_time 语义一致）----
-  // 后台 200Hz 采样融合状态，state(t) 返回“t - serial_delay_time”时刻的样本，
+  // ---- 状态反馈延迟对齐（语义与 serial 通道 serial_delay_time 一致）----
+  // 后台 200Hz 采样融合状态，state(t) 返回“t - state_delay_ms”时刻的样本，
   // 让弹道解算拿到的姿态与图像同一时刻；仅缓存 fused.valid 后的锚定样本。
   struct TorqueStateSample
   {
     std::chrono::steady_clock::time_point ts;
     io::State state;
   };
-  double serial_delay_ms_ = 30.0;
+  double state_delay_ms_ = 20.0;   // torque 通道独立配置（torque_controller.state_delay_ms）
   mutable std::mutex sample_mtx_;
   std::deque<TorqueStateSample> samples_;
   std::atomic<bool> sampler_running_{false};
@@ -78,9 +78,10 @@ TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
   auto yaml = tools::load(config_path);
   const YAML::Node tc = yaml["torque_controller"];
 
-  // 与 serial 通道共用同一个延迟对齐配置（ms）
-  if (yaml["serial_delay_time"]) {
-    impl_->serial_delay_ms_ = yaml["serial_delay_time"].as<double>();
+  // 状态反馈延迟对齐：torque 通道独立配置，默认 20ms；
+  // 不复用 serial 通道的 serial_delay_time，避免改到串口通道的调校值
+  if (tc["state_delay_ms"]) {
+    impl_->state_delay_ms_ = tc["state_delay_ms"].as<double>();
   }
 
   const double dt_control = tc["dt_control"] ? tc["dt_control"].as<double>() : 0.01;
@@ -218,9 +219,9 @@ io::State TorqueGimbalSender::state(std::chrono::steady_clock::time_point t) con
     return fresh;
   }
 
-  // 延迟对齐：返回 t - serial_delay_time 时刻最接近的样本（与 serial 通道一致）
+  // 延迟对齐：返回 t - state_delay_ms 时刻最接近的样本（与 serial 通道语义一致）
   const auto target =
-    t - std::chrono::milliseconds(static_cast<int64_t>(impl_->serial_delay_ms_));
+    t - std::chrono::milliseconds(static_cast<int64_t>(impl_->state_delay_ms_));
   const TorqueGimbalSender::Impl::TorqueStateSample * best = nullptr;
   auto best_dist = std::chrono::steady_clock::duration::max();
   for (const auto & smp : impl_->samples_) {
