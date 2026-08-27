@@ -11,11 +11,16 @@ find_package(g2o REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(OpenVINO REQUIRED openvino)
-# OpenVINO 2024.6 apt pkg-config lists JAX frontend, but the Ubuntu package does not ship it.
-# This project uses OpenVINO IR (.xml/.bin), so JAX frontend is not required.
 list(REMOVE_ITEM OpenVINO_LIBRARIES openvino_jax_frontend)
-# MkvWriter（TwoVideoLogger）依赖 ffmpeg
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libavutil libswscale)
+
+set(SUPERPOWER_TONGJI_PREDICTOR_SRC
+    auto_aim/EKF/superpower_tongji/SuperPowerPredictor.cpp)
+# The xiugai implementation source is kept byte-for-byte. These two compile
+# definitions rename only its public class token and select the implementation
+# declaration instead of the runtime facade in EKF/SuperPowerPredictor.h.
+set_source_files_properties(${SUPERPOWER_TONGJI_PREDICTOR_SRC} PROPERTIES
+    COMPILE_DEFINITIONS "SUPERPOWER_TONGJI_IMPL;SuperPowerPredictor=SuperPowerTongjiPredictor")
 
 add_library(tasks STATIC
     auto_aim/2d_armor_detector/Armor.cpp
@@ -29,12 +34,18 @@ add_library(tasks STATIC
     auto_aim/3d_processing/RestFrame.cpp
     auto_aim/predictor/PositionPredictor2D.cpp
     auto_aim/predictor/PeriodicDataPredictor.cpp
-    # PredictorSwitcher.cpp remains only for PredictorType ABI/UI labels.
     auto_aim/predictor/PredictorSwitcher.cpp
-    auto_aim/EKF/SuperPowerEKF.cpp
-    auto_aim/EKF/SuperPowerTarget.cpp
-    auto_aim/EKF/SuperPowerTracker.cpp
+
+    # Runtime ordinary-vehicle EKF facade.
     auto_aim/EKF/SuperPowerPredictor.cpp
+    # Tongji/SuperPower backend: latest xiugai implementation.
+    auto_aim/EKF/superpower_tongji/SuperPowerEKF.cpp
+    auto_aim/EKF/superpower_tongji/SuperPowerTarget.cpp
+    auto_aim/EKF/superpower_tongji/SuperPowerTracker.cpp
+    ${SUPERPOWER_TONGJI_PREDICTOR_SRC}
+    # NJUST/Alliance backend: 11D lightbar-pixel reprojection EKF.
+    auto_aim/EKF/alliance_njust/AllianceLightbarPredictor.cpp
+
     auto_aim/predictor/AllPredictor.cpp
     auto_aim/predictor/TargetManager.cpp
     auto_aim/predictor/PredictorMain.cpp
@@ -84,9 +95,7 @@ target_link_libraries(tasks
 
 if(BUILD_TESTING)
     add_executable(superpower_joint_update_test
-        auto_aim/EKF/SuperPowerJointUpdateCheck.cpp
-    )
+        auto_aim/EKF/superpower_tongji/SuperPowerJointUpdateCheck.cpp)
     target_link_libraries(superpower_joint_update_test PRIVATE tasks)
-    add_test(NAME superpower_joint_update
-             COMMAND superpower_joint_update_test)
+    add_test(NAME superpower_joint_update COMMAND superpower_joint_update_test)
 endif()
