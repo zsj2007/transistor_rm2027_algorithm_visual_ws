@@ -162,3 +162,51 @@ std::pair<int, int> findTwoSmallestIndices(const std::vector<double>& nums) {
     
     return {min1, min2};
 }
+
+// 将相机到车辆中心的方向与装甲板外法线夹角映射到 [0, 1] 的正对损失。
+// 输入方向退化或非有限时返回中性损失 0.5，防止无效几何主导选板。
+double normalizedArmorFacingLoss(
+    const cv::Point2d& camera_to_center_direction, double armor_yaw) {
+    const double direction_norm = cv::norm(camera_to_center_direction);
+    if (direction_norm <= 1e-12 || !std::isfinite(direction_norm)) {
+        return 0.5;
+    }
+    const cv::Point2d unit_direction =
+        camera_to_center_direction / direction_norm;
+    const cv::Point2d armor_normal{
+        std::sin(armor_yaw), -std::cos(armor_yaw)};
+    const double cosine = std::clamp(
+        unit_direction.dot(armor_normal), -1.0, 1.0);
+    // 正对相机时 cosine=-1、损失为 0；背对相机时损失为 1。
+    return 0.5 * (1.0 + cosine);
+}
+
+// 总损失仅由归一化正对损失和切板惩罚组成，不引入角速度等第三项。
+// 以当前板作为初始最优项，使浮点损失相同时保持当前板而不发生切换。
+int selectArmorByFacingAndSwitchPenalty(
+    const std::vector<double>& facing_losses,
+    int previous_id,
+    double switch_penalty) {
+    const bool previous_valid =
+        previous_id >= 0 &&
+        static_cast<std::size_t>(previous_id) < facing_losses.size() &&
+        std::isfinite(facing_losses[static_cast<std::size_t>(previous_id)]);
+    const double penalty = std::max(0.0, switch_penalty);
+    int best_id = previous_valid ? previous_id : -1;
+    double best_loss = previous_valid
+        ? facing_losses[static_cast<std::size_t>(previous_id)]
+        : std::numeric_limits<double>::infinity();
+
+    for (std::size_t id = 0; id < facing_losses.size(); ++id) {
+        if (!std::isfinite(facing_losses[id])) continue;
+        const double total_loss = facing_losses[id] +
+            (previous_valid && static_cast<int>(id) != previous_id
+                 ? penalty
+                 : 0.0);
+        if (total_loss + 1e-12 < best_loss) {
+            best_loss = total_loss;
+            best_id = static_cast<int>(id);
+        }
+    }
+    return best_id;
+}

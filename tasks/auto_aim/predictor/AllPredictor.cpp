@@ -131,6 +131,7 @@ void AllPredictor::resetTarget()
     last_pixel_horizontal_center_distance = 1e10F;
     latest_armor_distance = 1e10F;
     armor_is_large = false;
+    last_selected_aim_id_ = -1;
 
     ekf_fire_control_data.aim_center_schmitt_trigger = false;
     ekf_fire_control_data.new_target = true;
@@ -492,36 +493,27 @@ PredictorResult AllPredictor::step(
                 if (cam_to_center_vector_norm > 1e-3) {
                     unit_cam_to_center_vector = cam_to_center_vector / cam_to_center_vector_norm;
                 }
-                std::vector<double> unit_center_v_dot_yaw(RMM_pred_aim_data.armors.size());
+                std::vector<double> facing_losses;
+                facing_losses.reserve(RMM_pred_aim_data.armors.size());
+                // 方向偏置只供后续停火边界使用，不参与当前两项选板损失。
                 float choose_armor_yaw_bias_with_direction = choose_armor_yaw_bias;
                 choose_armor_yaw_bias_with_direction *= static_cast<float>(RMM_pred_aim_data.rotation_direction);
-                for (int RMM_pred_aim_armor_i = 0; RMM_pred_aim_armor_i < RMM_pred_aim_data.armors.size(); RMM_pred_aim_armor_i += 1) {
-                    EKFPredictedArmor& RMM_pred_aim_armor = RMM_pred_aim_data.armors[RMM_pred_aim_armor_i];
-                    cv::Point2d yaw_vector = {std::sin(RMM_pred_aim_armor.yaw + choose_armor_yaw_bias_with_direction), -std::cos(RMM_pred_aim_armor.yaw + choose_armor_yaw_bias_with_direction)};
-                    unit_center_v_dot_yaw[RMM_pred_aim_armor_i] = cam_to_center_vector.dot(yaw_vector);
+                for (const EKFPredictedArmor& armor : RMM_pred_aim_data.armors) {
+                    facing_losses.push_back(normalizedArmorFacingLoss(
+                        unit_cam_to_center_vector, armor.yaw));
                 }
-                std::pair<int, int> nearest_two_idx = findTwoSmallestIndices(unit_center_v_dot_yaw);
-                auto nearest_armor = RMM_pred_aim_data.armors[nearest_two_idx.first];
-                auto second_nearest_armor = RMM_pred_aim_data.armors[nearest_two_idx.second];
-                auto chosen_armor = nearest_armor;
-
-                if (abs(RMM_state.w) < ekf_fire_control_data.low_vyaw_threshold) {
-                    cv::Point2d yaw_vector_1 = {std::sin(nearest_armor.yaw), -std::cos(nearest_armor.yaw)};
-                    double yaw_bias_1 = acos(-unit_cam_to_center_vector.dot(yaw_vector_1));
-                    cv::Point2d yaw_vector_2 = {std::sin(second_nearest_armor.yaw), -std::cos(second_nearest_armor.yaw)};
-                    double yaw_bias_2 = acos(-unit_cam_to_center_vector.dot(yaw_vector_2));
-                    if (abs(yaw_bias_1 - yaw_bias_2) < ekf_fire_control_data.low_vyaw_change_target_delta_yaw_threshold) {
-                        float delta_yaw_1 = nearest_armor.yaw - ekf_fire_control_data.last_target_yaw;
-                        delta_yaw_1 = atan2(sin(delta_yaw_1), cos(delta_yaw_1));
-                        float delta_yaw_2 = second_nearest_armor.yaw - ekf_fire_control_data.last_target_yaw;
-                        delta_yaw_2 = atan2(sin(delta_yaw_2), cos(delta_yaw_2));
-                        if (abs(delta_yaw_1) < abs(delta_yaw_2)) {
-                            chosen_armor = nearest_armor;
-                        } else {
-                            chosen_armor = second_nearest_armor;
-                        }
-                    }
-                }
+                // 首次选板以 EKF 的物理 matched_id 为基准，之后保持实际瞄准板 ID。
+                const int previous_aim_id = last_selected_aim_id_ >= 0
+                    ? last_selected_aim_id_
+                    : RMM_debug.matched_id;
+                int chosen_armor_id = selectArmorByFacingAndSwitchPenalty(
+                    facing_losses, previous_aim_id,
+                    choose_armor_switch_penalty);
+                if (chosen_armor_id < 0) chosen_armor_id = 0;
+                const EKFPredictedArmor chosen_armor =
+                    RMM_pred_aim_data.armors[
+                        static_cast<std::size_t>(chosen_armor_id)];
+                last_selected_aim_id_ = chosen_armor_id;
 
                 predicted_armor_pos = {
                     static_cast<float>(chosen_armor.x),

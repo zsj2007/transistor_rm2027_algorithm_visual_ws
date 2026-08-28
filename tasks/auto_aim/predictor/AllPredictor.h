@@ -150,6 +150,10 @@ public:
 
         extra_predict_time = (*config_file_ptr)["extra_predict_time"].as<float>();
         choose_armor_yaw_bias = M_PI / 180.0 * (*config_file_ptr)["choose_armor_yaw_bias_degree"].as<float>();
+        choose_armor_switch_penalty =
+            (*config_file_ptr)["choose_armor_switch_penalty"]
+                ? std::max(0.0F, (*config_file_ptr)["choose_armor_switch_penalty"].as<float>())
+                : 0.15F;
         const YAML::Node comparison =
             (*config_file_ptr)["superpower_ekf"]["comparison"];
         comparison_enabled_ =
@@ -230,6 +234,9 @@ private:
 
     float choose_armor_yaw_bias;
 
+    // 非当前物理装甲板需要额外承担的切换损失，以及上次实际瞄准的板 ID。
+    float choose_armor_switch_penalty = 0.15F;
+    int last_selected_aim_id_ = -1;
     float extra_predict_time;
 
 };

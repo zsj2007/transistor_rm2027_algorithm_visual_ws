@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -175,6 +176,16 @@ private:
     static double toProjectYaw(double superpower_angle);
     static double wrapAngle(double angle);
 
+    struct PhaseSample {
+        double t = 0.0;
+        double phase = 0.0;
+    };
+    // 清空相位样本、解包基准和拟合诊断状态。
+    void resetAngularVelocityFit();
+    // 根据本帧 matched_id 还原车体相位，解包后用滑窗最小二乘拟合 w。
+    // observation_time 为当前观测时间戳，单位为秒。
+    void observeAngularVelocity(double observation_time);
+
     // 重建底层状态机；初始化函数用首条观测建立时间基准和初始 Target。
     void resetTracker();
     void initializeFromObservation(const EKFTargetObservation& observation);
@@ -188,6 +199,19 @@ private:
     std::unique_ptr<sp_ekf::Tracker> tracker_;
     sp_ekf::TrackerResult last_result_;
     std::optional<sp_ekf::ArmorObservation> last_observation_;
+
+    // 利用匹配到的物理装甲 ID 恢复连续车体相位，并在滑窗内拟合角速度 w。
+    double angular_velocity_fit_window_s_ = 0.20;
+    std::size_t angular_velocity_fit_min_samples_ = 4;
+    std::deque<PhaseSample> phase_samples_;
+    bool phase_reference_valid_ = false;
+    bool phase_fit_valid_ = false;
+    double last_phase_wrapped_ = 0.0;
+    double unwrapped_phase_ = 0.0;
+    double phase_last_delta_ = 0.0;
+    double phase_w_instant_ = 0.0;
+    double phase_w_fit_ = 0.0;
+    bool phase_w_applied_ = false;
 
     // 时间戳保护：拒绝非有限、重复或乱序时间，避免异常 dt 污染 EKF。
     double last_update_time_ = 0.0;

@@ -36,6 +36,16 @@ SuperPowerPredictor::SuperPowerPredictor(
                 config_.initial_radius_m = sp["initial_radius_m"].as<double>();
             if (sp["armor_num"])
                 config_.armor_num = sp["armor_num"].as<int>();
+            const YAML::Node angular_fit = sp["angular_velocity_fit"];
+            if (angular_fit) {
+                if (angular_fit["window_s"])
+                    angular_velocity_fit_window_s_ = std::max(
+                        0.02, angular_fit["window_s"].as<double>());
+                if (angular_fit["min_samples"])
+                    angular_velocity_fit_min_samples_ =
+                        static_cast<std::size_t>(std::max(
+                            2, angular_fit["min_samples"].as<int>()));
+            }
             const YAML::Node joint = sp["joint_update"];
             if (joint) {
                 if (joint["enabled"])
@@ -114,6 +124,7 @@ void SuperPowerPredictor::updateImpl(
 
     if (dt > config_.max_dt_s) {
         time_discontinuity_ = true;
+        resetAngularVelocityFit();
     }
 
     last_observation_ = toSuperPower(primary);
@@ -143,6 +154,12 @@ void SuperPowerPredictor::updateImpl(
     }
     if (last_result_.matched_id >= 0) {
         debug_flip_flag_ = (last_result_.matched_id % 2) + 1;
+    }
+    if (last_result_.initialized_this_frame) {
+        resetAngularVelocityFit();
+    }
+    if (last_result_.updated && last_result_.matched_id >= 0) {
+        observeAngularVelocity(primary.t);
     }
 }
 
@@ -176,6 +193,7 @@ void SuperPowerPredictor::missUpdate(double update_time) {
 
     if (dt > config_.max_dt_s) {
         time_discontinuity_ = true;
+        resetAngularVelocityFit();
     }
 
     last_observation_.reset();
@@ -292,6 +310,11 @@ EKFTargetDebugState SuperPowerPredictor::debugState() const {
     debug.yaw_error_deg = last_result_.angle_error >= 0.0
                               ? last_result_.angle_error * 180.0 / kPi
                               : -1.0;
+    debug.phase_observer_valid = phase_fit_valid_;
+    debug.phase_delta = phase_last_delta_;
+    debug.phase_w_instant = phase_w_instant_;
+    debug.phase_w_filtered = phase_w_fit_;
+    debug.phase_w_applied = phase_w_applied_;
     debug.armor_switched = last_result_.armor_switched;
     debug.joint_pair_requested = last_result_.pair_requested;
     debug.joint_pair_used = last_result_.pair_used;
@@ -390,10 +413,88 @@ void SuperPowerPredictor::warnTimeIssue(const char* reason,
     }
 }
 
+// 清除旧目标或异常时间段留下的相位样本，下一帧观测将重新建立解包基准。
+void SuperPowerPredictor::resetAngularVelocityFit() {
+    phase_samples_.clear();
+    phase_reference_valid_ = false;
+    phase_fit_valid_ = false;
+    last_phase_wrapped_ = 0.0;
+    unwrapped_phase_ = 0.0;
+    phase_last_delta_ = 0.0;
+    phase_w_instant_ = 0.0;
+    phase_w_fit_ = 0.0;
+    phase_w_applied_ = false;
+}
+
+// 先用 matched_id 扣除各装甲板的固定相位差，再对连续相位执行普通最小二乘拟合。
+// 拟合斜率即角速度 w；样本不足或时间方差过小时保留当前角速度，不做回写。
+void SuperPowerPredictor::observeAngularVelocity(double observation_time) {
+    phase_w_applied_ = false;
+    if (!last_observation_ || !tracker_ || !tracker_->hasState() ||
+        last_result_.matched_id < 0 || config_.armor_num <= 0) {
+        return;
+    }
+
+    const double armor_phase =
+        last_result_.matched_id * 2.0 * kPi /
+        static_cast<double>(config_.armor_num);
+    const double phase_wrapped =
+        wrapAngle(last_observation_->angle - armor_phase);
+
+    if (!phase_reference_valid_) {
+        phase_reference_valid_ = true;
+        last_phase_wrapped_ = phase_wrapped;
+        unwrapped_phase_ = phase_wrapped;
+    } else {
+        phase_last_delta_ = wrapAngle(phase_wrapped - last_phase_wrapped_);
+        const double sample_dt = observation_time - phase_samples_.back().t;
+        if (sample_dt > 1e-9) {
+            phase_w_instant_ = phase_last_delta_ / sample_dt;
+        }
+        unwrapped_phase_ += phase_last_delta_;
+        last_phase_wrapped_ = phase_wrapped;
+    }
+
+    phase_samples_.push_back({observation_time, unwrapped_phase_});
+    while (phase_samples_.size() > 1 &&
+           observation_time - phase_samples_.front().t >
+               angular_velocity_fit_window_s_) {
+        phase_samples_.pop_front();
+    }
+
+    if (phase_samples_.size() < angular_velocity_fit_min_samples_) return;
+
+    double mean_t = 0.0;
+    double mean_phase = 0.0;
+    for (const PhaseSample& sample : phase_samples_) {
+        mean_t += sample.t;
+        mean_phase += sample.phase;
+    }
+    mean_t /= static_cast<double>(phase_samples_.size());
+    mean_phase /= static_cast<double>(phase_samples_.size());
+
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (const PhaseSample& sample : phase_samples_) {
+        const double centered_t = sample.t - mean_t;
+        numerator += centered_t * (sample.phase - mean_phase);
+        denominator += centered_t * centered_t;
+    }
+    if (denominator <= 1e-12) return;
+
+    phase_w_fit_ = numerator / denominator;
+    phase_fit_valid_ = std::isfinite(phase_w_fit_);
+    if (phase_fit_valid_) {
+        tracker_->setAngularVelocity(phase_w_fit_);
+        phase_w_applied_ = true;
+    }
+}
+
 void SuperPowerPredictor::resetTracker() {
     // 重新创建 Tracker 同时清空其结果快照；时间状态由调用方单独复位。
     tracker_ = std::make_unique<sp_ekf::Tracker>(config_);
     last_result_ = sp_ekf::TrackerResult{};
+    resetAngularVelocityFit();
 }
 
 void SuperPowerPredictor::initializeFromObservation(
@@ -408,6 +509,9 @@ void SuperPowerPredictor::initializeFromObservation(
     update_frames_ = last_result_.initialized_this_frame ? 1 : 0;
     if (last_result_.matched_id >= 0) {
         debug_flip_flag_ = (last_result_.matched_id % 2) + 1;
+    }
+    if (last_result_.updated && last_result_.matched_id >= 0) {
+        observeAngularVelocity(observation.t);
     }
 }
 
