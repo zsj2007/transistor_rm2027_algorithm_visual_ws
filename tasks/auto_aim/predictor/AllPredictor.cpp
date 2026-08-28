@@ -132,6 +132,11 @@ void AllPredictor::resetTarget()
     latest_armor_distance = 1e10F;
     armor_is_large = false;
     last_selected_aim_id_ = -1;
+    pending_selected_aim_id_ = -1;
+    pending_selected_aim_frames_ = 0;
+    latched_rotation_direction_ = 1;
+    pending_rotation_direction_ = 0;
+    pending_rotation_direction_frames_ = 0;
 
     ekf_fire_control_data.aim_center_schmitt_trigger = false;
     ekf_fire_control_data.new_target = true;
@@ -175,6 +180,135 @@ ArmorResult* AllPredictor::selectCurrentMeasurement(
         }
     }
     return measurement;
+}
+
+// 旋转速度足够大时才更新方向；低速保持旧方向，避免 w 在零附近抖动导致区域互换。
+void AllPredictor::updateLatchedRotationDirection(double angular_velocity)
+{
+    if (!std::isfinite(angular_velocity) ||
+        std::abs(angular_velocity) < ekf_fire_control_data.low_vyaw_threshold) {
+        return;
+    }
+
+    const int measured_direction = angular_velocity >= 0.0 ? 1 : -1;
+    if (last_selected_aim_id_ < 0) {
+        latched_rotation_direction_ = measured_direction;
+        pending_rotation_direction_ = 0;
+        pending_rotation_direction_frames_ = 0;
+        return;
+    }
+
+    if (measured_direction == latched_rotation_direction_) {
+        pending_rotation_direction_ = 0;
+        pending_rotation_direction_frames_ = 0;
+        return;
+    }
+
+    if (pending_rotation_direction_ == measured_direction) {
+        ++pending_rotation_direction_frames_;
+    } else {
+        pending_rotation_direction_ = measured_direction;
+        pending_rotation_direction_frames_ = 1;
+    }
+
+    if (pending_rotation_direction_frames_ >=
+        choose_armor_switch_confirm_frames) {
+        latched_rotation_direction_ = measured_direction;
+        pending_rotation_direction_ = 0;
+        pending_rotation_direction_frames_ = 0;
+        pending_selected_aim_id_ = -1;
+        pending_selected_aim_frames_ = 0;
+    }
+}
+
+// 区域优先级先给出候选板，再用角度迟滞和连续帧确认抑制 45 度边界附近的反复切换。
+int AllPredictor::selectPredictedArmorByRegion(
+    const EKFTargetPrediction& prediction,
+    const cv::Point2d& camera_to_center_direction)
+{
+    if (prediction.armors.empty()) return -1;
+
+    updateLatchedRotationDirection(prediction.w);
+
+    std::vector<double> directed_angles;
+    std::vector<ArmorVisibilityRegion> regions;
+    directed_angles.reserve(prediction.armors.size());
+    regions.reserve(prediction.armors.size());
+    for (const EKFPredictedArmor& armor : prediction.armors) {
+        const double directed_angle = directedArmorVisibilityAngle(
+            camera_to_center_direction,
+            armor.yaw,
+            latched_rotation_direction_);
+        directed_angles.push_back(directed_angle);
+        regions.push_back(classifyArmorVisibilityRegion(directed_angle));
+    }
+
+    const bool current_valid =
+        last_selected_aim_id_ >= 0 &&
+        static_cast<std::size_t>(last_selected_aim_id_) < regions.size();
+    const int candidate_id = selectArmorByVisibilityRegion(
+        regions, current_valid ? last_selected_aim_id_ : -1);
+    if (candidate_id < 0) {
+        return current_valid ? last_selected_aim_id_ : 0;
+    }
+
+    if (!current_valid) {
+        last_selected_aim_id_ = candidate_id;
+        pending_selected_aim_id_ = -1;
+        pending_selected_aim_frames_ = 0;
+        return last_selected_aim_id_;
+    }
+
+    const ArmorVisibilityRegion current_region =
+        regions[static_cast<std::size_t>(last_selected_aim_id_)];
+    const ArmorVisibilityRegion candidate_region =
+        regions[static_cast<std::size_t>(candidate_id)];
+    // 即使车辆已经急停，旧板进入不可见半区后也必须立即交给当前最优可见板。
+    if (current_region == ArmorVisibilityRegion::Invisible) {
+        last_selected_aim_id_ = candidate_id;
+        pending_selected_aim_id_ = -1;
+        pending_selected_aim_frames_ = 0;
+        return last_selected_aim_id_;
+    }
+
+    // 车辆近似停止时保持当前瞄准板，不让不可靠的旋转方向触发切板。
+    if (std::abs(prediction.w) < ekf_fire_control_data.low_vyaw_threshold) {
+        pending_selected_aim_id_ = -1;
+        pending_selected_aim_frames_ = 0;
+        return last_selected_aim_id_;
+    }
+
+    if (candidate_id == last_selected_aim_id_) {
+        pending_selected_aim_id_ = -1;
+        pending_selected_aim_frames_ = 0;
+        return last_selected_aim_id_;
+    }
+
+    const double hysteresis = std::clamp(
+        static_cast<double>(choose_armor_region_hysteresis),
+        0.0, M_PI / 4.0 - 1e-6);
+    if (candidate_region == ArmorVisibilityRegion::GoldenShooting &&
+        directed_angles[static_cast<std::size_t>(candidate_id)] <
+            M_PI / 4.0 + hysteresis) {
+        pending_selected_aim_id_ = -1;
+        pending_selected_aim_frames_ = 0;
+        return last_selected_aim_id_;
+    }
+
+    if (pending_selected_aim_id_ == candidate_id) {
+        ++pending_selected_aim_frames_;
+    } else {
+        pending_selected_aim_id_ = candidate_id;
+        pending_selected_aim_frames_ = 1;
+    }
+
+    if (pending_selected_aim_frames_ >=
+        choose_armor_switch_confirm_frames) {
+        last_selected_aim_id_ = candidate_id;
+        pending_selected_aim_id_ = -1;
+        pending_selected_aim_frames_ = 0;
+    }
+    return last_selected_aim_id_;
 }
 
 PredictorResult AllPredictor::step(
@@ -493,27 +627,16 @@ PredictorResult AllPredictor::step(
                 if (cam_to_center_vector_norm > 1e-3) {
                     unit_cam_to_center_vector = cam_to_center_vector / cam_to_center_vector_norm;
                 }
-                std::vector<double> facing_losses;
-                facing_losses.reserve(RMM_pred_aim_data.armors.size());
-                // 方向偏置只供后续停火边界使用，不参与当前两项选板损失。
-                float choose_armor_yaw_bias_with_direction = choose_armor_yaw_bias;
-                choose_armor_yaw_bias_with_direction *= static_cast<float>(RMM_pred_aim_data.rotation_direction);
-                for (const EKFPredictedArmor& armor : RMM_pred_aim_data.armors) {
-                    facing_losses.push_back(normalizedArmorFacingLoss(
-                        unit_cam_to_center_vector, armor.yaw));
-                }
-                // 首次选板以 EKF 的物理 matched_id 为基准，之后保持实际瞄准板 ID。
-                const int previous_aim_id = last_selected_aim_id_ >= 0
-                    ? last_selected_aim_id_
-                    : RMM_debug.matched_id;
-                int chosen_armor_id = selectArmorByFacingAndSwitchPenalty(
-                    facing_losses, previous_aim_id,
-                    choose_armor_switch_penalty);
+                // 统一使用弹丸到达时刻的预测位姿划分三区域，观测只负责更新 EKF。
+                int chosen_armor_id = selectPredictedArmorByRegion(
+                    RMM_pred_aim_data, unit_cam_to_center_vector);
                 if (chosen_armor_id < 0) chosen_armor_id = 0;
+                float choose_armor_yaw_bias_with_direction = choose_armor_yaw_bias;
+                choose_armor_yaw_bias_with_direction *=
+                    static_cast<float>(latched_rotation_direction_);
                 const EKFPredictedArmor chosen_armor =
                     RMM_pred_aim_data.armors[
                         static_cast<std::size_t>(chosen_armor_id)];
-                last_selected_aim_id_ = chosen_armor_id;
 
                 predicted_armor_pos = {
                     static_cast<float>(chosen_armor.x),
@@ -526,7 +649,7 @@ PredictorResult AllPredictor::step(
                     RMM_pred_aim_data.center_y - cam_position[1]);
                 float chosen_armor_yaw_bias =
                     (chosen_armor.yaw - cam_to_center_yaw) *
-                    static_cast<float>(RMM_pred_aim_data.rotation_direction);
+                    static_cast<float>(latched_rotation_direction_);
                 chosen_armor_yaw_bias = atan2(sin(chosen_armor_yaw_bias), cos(chosen_armor_yaw_bias));
 
                 EKF_fire_result_t RMM_fire_result = EKF_fire_control(chosen_armor, RMM_state, chosen_armor_yaw_bias, armor_is_large, cam_to_center_vector, choose_armor_yaw_bias_with_direction);

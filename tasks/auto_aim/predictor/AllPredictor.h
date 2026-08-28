@@ -150,10 +150,14 @@ public:
 
         extra_predict_time = (*config_file_ptr)["extra_predict_time"].as<float>();
         choose_armor_yaw_bias = M_PI / 180.0 * (*config_file_ptr)["choose_armor_yaw_bias_degree"].as<float>();
-        choose_armor_switch_penalty =
-            (*config_file_ptr)["choose_armor_switch_penalty"]
-                ? std::max(0.0F, (*config_file_ptr)["choose_armor_switch_penalty"].as<float>())
-                : 0.15F;
+        choose_armor_region_hysteresis = M_PI / 180.0F *
+            ((*config_file_ptr)["choose_armor_region_hysteresis_degree"]
+                 ? std::max(0.0F, (*config_file_ptr)["choose_armor_region_hysteresis_degree"].as<float>())
+                 : 5.0F);
+        choose_armor_switch_confirm_frames =
+            (*config_file_ptr)["choose_armor_switch_confirm_frames"]
+                ? std::max(1, (*config_file_ptr)["choose_armor_switch_confirm_frames"].as<int>())
+                : 2;
         const YAML::Node comparison =
             (*config_file_ptr)["superpower_ekf"]["comparison"];
         comparison_enabled_ =
@@ -173,6 +177,13 @@ public:
     std::optional<std::string> ekfTrackerState() const;
     ArmorResult* selectCurrentMeasurement(std::vector<ArmorResult>& candidates);
 private:
+    // 低速时锁存旋转方向；反向连续确认后才改变 Appearing/Disappearing 定义。
+    void updateLatchedRotationDirection(double angular_velocity);
+    // 用预测到弹丸到达时刻的四块装甲区域，经过迟滞和连续确认后选择瞄准板。
+    int selectPredictedArmorByRegion(
+        const EKFTargetPrediction& prediction,
+        const cv::Point2d& camera_to_center_direction);
+
     ArmorType::ArmorType armor_class;
     bool armor_is_large;
 
@@ -234,9 +245,16 @@ private:
 
     float choose_armor_yaw_bias;
 
-    // 非当前物理装甲板需要额外承担的切换损失，以及上次实际瞄准的板 ID。
-    float choose_armor_switch_penalty = 0.15F;
+    // 区域切换迟滞与状态：候选板连续确认后才提交，低速时保持上次可靠方向。
+    float choose_armor_region_hysteresis = 5.0F * M_PI / 180.0F;
+    int choose_armor_switch_confirm_frames = 2;
     int last_selected_aim_id_ = -1;
+    int pending_selected_aim_id_ = -1;
+    int pending_selected_aim_frames_ = 0;
+    int latched_rotation_direction_ = 1;
+    int pending_rotation_direction_ = 0;
+    int pending_rotation_direction_frames_ = 0;
+
     float extra_predict_time;
 
 };

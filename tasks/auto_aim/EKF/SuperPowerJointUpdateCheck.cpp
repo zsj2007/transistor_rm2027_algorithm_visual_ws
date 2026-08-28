@@ -99,29 +99,50 @@ bool fallbackTest() {
     return ok;
 }
 
-// 验证正对损失的归一化边界，以及切板惩罚的保持与切换条件。
-bool armorSelectionLossTest() {
+// 验证三区域边界、正反转方向映射和 Golden > Appearing > Disappearing 优先级。
+bool armorVisibilityRegionTest() {
     bool ok = true;
     const cv::Point2d camera_to_center(0.0, 1.0);
-    ok &= expect(std::abs(normalizedArmorFacingLoss(
-                             camera_to_center, 0.0)) < 1e-12,
-                 "front-facing loss is not zero");
-    ok &= expect(std::abs(normalizedArmorFacingLoss(
-                             camera_to_center, kPi / 2.0) - 0.5) < 1e-12,
-                 "side-facing loss is not 0.5");
-    ok &= expect(std::abs(normalizedArmorFacingLoss(
-                             camera_to_center, kPi) - 1.0) < 1e-12,
-                 "back-facing loss is not one");
+    const double appearing_angle = directedArmorVisibilityAngle(
+        camera_to_center, -kPi / 2.0 + 0.01, 1);
+    const double golden_angle = directedArmorVisibilityAngle(
+        camera_to_center, 0.0, 1);
+    const double disappearing_angle = directedArmorVisibilityAngle(
+        camera_to_center, kPi / 2.0 - 0.01, 1);
+    const double reverse_appearing_angle = directedArmorVisibilityAngle(
+        camera_to_center, kPi / 2.0 - 0.01, -1);
 
-    ok &= expect(selectArmorByFacingAndSwitchPenalty(
-                     {0.10, 0.05}, 0, 0.10) == 0,
-                 "switch penalty did not retain the current armor");
-    ok &= expect(selectArmorByFacingAndSwitchPenalty(
-                     {0.25, 0.05}, 0, 0.10) == 1,
-                 "facing gain did not overcome the switch penalty");
-    ok &= expect(selectArmorByFacingAndSwitchPenalty(
-                     {0.10, 0.05}, -1, 0.10) == 1,
-                 "first selection should not pay a switch penalty");
+    ok &= expect(classifyArmorVisibilityRegion(appearing_angle) ==
+                     ArmorVisibilityRegion::Appearing,
+                 "positive rotation appearing region is wrong");
+    ok &= expect(classifyArmorVisibilityRegion(golden_angle) ==
+                     ArmorVisibilityRegion::GoldenShooting,
+                 "front-facing armor is not in golden region");
+    ok &= expect(classifyArmorVisibilityRegion(disappearing_angle) ==
+                     ArmorVisibilityRegion::Disappearing,
+                 "positive rotation disappearing region is wrong");
+    ok &= expect(classifyArmorVisibilityRegion(reverse_appearing_angle) ==
+                     ArmorVisibilityRegion::Appearing,
+                 "negative rotation did not swap appearing direction");
+    ok &= expect(classifyArmorVisibilityRegion(kPi / 4.0) ==
+                     ArmorVisibilityRegion::GoldenShooting,
+                 "45-degree boundary is not left-closed golden region");
+    ok &= expect(classifyArmorVisibilityRegion(3.0 * kPi / 4.0) ==
+                     ArmorVisibilityRegion::Disappearing,
+                 "135-degree boundary is not left-closed disappearing region");
+
+    ok &= expect(selectArmorByVisibilityRegion(
+                     {ArmorVisibilityRegion::Appearing,
+                      ArmorVisibilityRegion::GoldenShooting}, 0) == 1,
+                 "golden region did not beat appearing region");
+    ok &= expect(selectArmorByVisibilityRegion(
+                     {ArmorVisibilityRegion::GoldenShooting,
+                      ArmorVisibilityRegion::GoldenShooting}, 1) == 1,
+                 "equal-priority selection did not retain current armor");
+    ok &= expect(selectArmorByVisibilityRegion(
+                     {ArmorVisibilityRegion::Disappearing,
+                      ArmorVisibilityRegion::Appearing}, 0) == 1,
+                 "appearing region did not beat disappearing region");
     return ok;
 }
 
@@ -185,7 +206,7 @@ int main() {
     ok &= adjacentCandidateTest(-0.28, kPi / 2.0, 1);
     ok &= adjacentCandidateTest(0.28, -kPi / 2.0, 3);
     ok &= fallbackTest();
-    ok &= armorSelectionLossTest();
+    ok &= armorVisibilityRegionTest();
     ok &= angularVelocityLeastSquaresTest();
     if (ok) {
         std::cout << "SuperPower joint update tests passed" << std::endl;

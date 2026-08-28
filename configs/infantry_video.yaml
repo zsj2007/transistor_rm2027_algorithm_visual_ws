@@ -139,7 +139,8 @@ aim_center_yaw_bias_expand : 0.0
 low_vyaw_change_target_delta_yaw_threshold_degree : 30.0
 low_vyaw_threshold : 0.3
 choose_armor_yaw_bias_degree : 15.0
-choose_armor_switch_penalty : 0.15 # 切换到非当前物理装甲板时增加的损失
+choose_armor_region_hysteresis_degree : 5.0 # 新板越过45度边界后的切换迟滞
+choose_armor_switch_confirm_frames : 2 # 候选区域连续满足多少帧后提交切板
 
 # Params.h 参数设置
 min_light_height : 8
