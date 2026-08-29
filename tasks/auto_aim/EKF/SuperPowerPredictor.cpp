@@ -40,13 +40,6 @@ bool SuperPowerPredictor::readAllianceBackend(const YAML::Node& root)
     const YAML::Node n = root["ordinary_vehicle_ekf"];
     if (n && n["backend"]) {
         value = n["backend"].as<std::string>();
-    } else {
-        try {
-            const YAML::Node selector =
-                YAML::LoadFile("configs/ordinary_vehicle_ekf.yaml");
-            if (selector["backend"]) value = selector["backend"].as<std::string>();
-        } catch (const std::exception&) {
-        }
     }
     value = lowerCopy(value);
     if (value == "alliance" || value == "njust" ||

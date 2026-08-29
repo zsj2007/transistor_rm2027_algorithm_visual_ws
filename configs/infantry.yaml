@@ -96,6 +96,12 @@ target_manager:
   outpost_max_temp_lost_frames: 75
   enable_priority_switch: false
 
+# 普通四装甲车辆 EKF 运行时后端选择（重启程序生效，无需重新编译）
+#   superpower : 同济 Tongji SuperPower EKF（默认，保留 joint-update/CrossLinePnP 路径）
+#   alliance   : 南理工 NJUST/Alliance 11D 灯条重投影 EKF
+ordinary_vehicle_ekf:
+  backend: superpower
+
 # Validated normal four-armor SuperPower EKF adapter settings.
 superpower_ekf:
   min_detect_count: 3

@@ -7,16 +7,19 @@ Two ordinary four-armor vehicle estimators are isolated here:
 
 `EKF/SuperPowerPredictor.{h,cpp}` is now a compatibility facade so the existing `xiugai` AllPredictor business path stays unchanged.
 
-Switch at runtime in `configs/ordinary_vehicle_ekf.yaml`:
+Switch at runtime in the YAML passed to the executable
+(`configs/infantry.yaml` or `configs/infantry_video.yaml`):
 
 ```yaml
-backend: superpower
+ordinary_vehicle_ekf:
+  backend: superpower
 ```
 
 or
 
 ```yaml
-backend: alliance
+ordinary_vehicle_ekf:
+  backend: alliance
 ```
 
 Restart the executable after changing it; no rebuild is needed. Base and Outpost keep their existing paths.
