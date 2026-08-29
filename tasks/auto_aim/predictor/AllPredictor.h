@@ -163,6 +163,9 @@ public:
         comparison_enabled_ =
             comparison && comparison["enabled"] &&
             comparison["enabled"].as<bool>();
+
+        // Register the shared world/camera transform for the runtime EKF facade.
+        SuperPowerPredictor::setRuntimeRestFrame(rest_frame_);
     }
 
     PredictorResult step(

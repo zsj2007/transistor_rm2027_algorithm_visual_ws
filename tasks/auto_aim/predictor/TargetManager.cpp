@@ -1,4 +1,5 @@
 #include "predictor/TargetManager.h"
+#include "EKF/SuperPowerPredictor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -44,6 +45,10 @@ TargetManagerUpdate TargetManager::update(
     double frame_timestamp_s,
     ArmorType::ArmorType acquire_policy)
 {
+    // Publish the detector frame once, before the ordinary predictor runs.
+    // SuperPower ignores this cache; Alliance consumes raw_light_bar_endpoints.
+    SuperPowerPredictor::publishFrameMeasurements(measurements);
+
     TargetManagerUpdate update;
     if (!std::isfinite(frame_timestamp_s)) {
         update.process_current_frame = false;
