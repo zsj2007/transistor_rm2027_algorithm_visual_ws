@@ -187,7 +187,7 @@ cmake --build build -j$(nproc)
 
 面板数据来自 `io::GimbalIo::torqueDebugState()`（`TorqueDebugState`）；`command_channel: serial` 时该接口返回 `valid=false`，面板只显示 VISION 行并提示 `torque channel disabled (serial)`。
 
-torque 通道的传感器状态（`GimbalIo::stateAt(t)`）与 serial 通道语义一致：按 `torque_controller.state_delay_ms`（默认 20ms，torque 通道独立配置）对帧时间戳 `t` 做**延迟对齐**，且仅在融合有效（`fused.valid`）后返回锚定状态（`mcu_yaw_online` 门控），避免弹道解算用“未锚定的 yaw”配旧图像。serial 通道仍用顶层的 `serial_delay_time`（30ms）。
+torque 通道现在优先使用海康帧信息中的设备时间戳：启动时通过 `GevTimestampControlLatch` / `GevTimestampValue` 将相机时钟映射到主机 `steady_clock`，每帧再用 `nDevTimeStampHigh/Low`（并按配置移动到曝光中点）查询同一时刻的融合状态。`torque_controller.state_delay_ms` 默认改为 `0`，只保留为残余标定误差的微调项；设备不支持硬件时间戳时会自动使用 `camera_timestamp.fallback_delay_ms`（默认 20ms）的旧近似。融合状态仍由 `fused.valid` / `mcu_yaw_online` 门控，serial 通道继续使用顶层 `serial_delay_time`。
 
 注意：`infantry_debug` 与 `visualizer` **可以同时运行**（可视化进程只读共享内存、不占串口）；不能同时跑的是第二个占用 MCU/IMU 串口的实例（`infantry` / `infantry_debug` / `torque_manual_test`）。
 

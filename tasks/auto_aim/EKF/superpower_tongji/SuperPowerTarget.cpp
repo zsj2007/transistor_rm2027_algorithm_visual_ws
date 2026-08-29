@@ -85,6 +85,13 @@ void Target::predict(double dt) {
     ekf_.predict(F, Q, f);
 }
 
+// 将有限的最小二乘角速度写入 EKF 的 w 状态，避免异常数值污染滤波器。
+void Target::setAngularVelocity(double angular_velocity) {
+    if (std::isfinite(angular_velocity)) {
+        ekf_.x[7] = angular_velocity;
+    }
+}
+
 TargetUpdateDebug Target::update(const ArmorObservation& armor) {
     TargetUpdateDebug debug;
     const int id = associateArmor(armor);

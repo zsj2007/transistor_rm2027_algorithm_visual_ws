@@ -1,5 +1,7 @@
 #include "utils/DataProcessFuncs.h"
 
+#include <limits>
+
 
 LinearRegressionResult linearRegression(const std::vector<double>& x, const std::vector<double>& y) {
     LinearRegressionResult result;
@@ -161,4 +163,66 @@ std::pair<int, int> findTwoSmallestIndices(const std::vector<double>& nums) {
     }
     
     return {min1, min2};
+}
+
+// 把装甲板相对正对方向的角度乘以旋转方向，使正反转都统一为从出现到消失递增。
+double directedArmorVisibilityAngle(
+    const cv::Point2d& camera_to_center_direction,
+    double armor_yaw,
+    int rotation_direction) {
+    const double direction_norm = cv::norm(camera_to_center_direction);
+    if (direction_norm <= 1e-12 || !std::isfinite(direction_norm) ||
+        !std::isfinite(armor_yaw)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const cv::Point2d unit_camera_to_center =
+        camera_to_center_direction / direction_norm;
+    const double camera_facing_yaw = std::atan2(
+        -unit_camera_to_center.x, unit_camera_to_center.y);
+    const int direction = rotation_direction >= 0 ? 1 : -1;
+    const double yaw_difference =
+        (armor_yaw - camera_facing_yaw) * static_cast<double>(direction);
+    const double wrapped_difference = std::atan2(
+        std::sin(yaw_difference), std::cos(yaw_difference));
+    return wrapped_difference + M_PI / 2.0;
+}
+
+// 使用左闭右开区间避免 45 度和 135 度边界同时属于两个区域。
+ArmorVisibilityRegion classifyArmorVisibilityRegion(double directed_angle) {
+    if (!std::isfinite(directed_angle) ||
+        directed_angle < 0.0 || directed_angle >= M_PI) {
+        return ArmorVisibilityRegion::Invisible;
+    }
+    if (directed_angle < M_PI / 4.0) {
+        return ArmorVisibilityRegion::Appearing;
+    }
+    if (directed_angle < 3.0 * M_PI / 4.0) {
+        return ArmorVisibilityRegion::GoldenShooting;
+    }
+    return ArmorVisibilityRegion::Disappearing;
+}
+
+// 枚举值就是区域优先级；若当前板与候选板同级，保留当前板抑制无意义切换。
+int selectArmorByVisibilityRegion(
+    const std::vector<ArmorVisibilityRegion>& regions,
+    int current_id) {
+    const bool current_valid =
+        current_id >= 0 &&
+        static_cast<std::size_t>(current_id) < regions.size() &&
+        regions[static_cast<std::size_t>(current_id)] !=
+            ArmorVisibilityRegion::Invisible;
+    int best_id = current_valid ? current_id : -1;
+    int best_priority = current_valid
+        ? static_cast<int>(regions[static_cast<std::size_t>(current_id)])
+        : static_cast<int>(ArmorVisibilityRegion::Invisible);
+
+    for (std::size_t id = 0; id < regions.size(); ++id) {
+        const int priority = static_cast<int>(regions[id]);
+        if (priority > best_priority) {
+            best_priority = priority;
+            best_id = static_cast<int>(id);
+        }
+    }
+    return best_id;
 }

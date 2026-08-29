@@ -1,4 +1,6 @@
+#include "EKF/SuperPowerPredictor.h"
 #include "EKF/SuperPowerTarget.h"
+#include "utils/DataProcessFuncs.h"
 
 #include <cmath>
 #include <iostream>
@@ -96,6 +98,107 @@ bool fallbackTest() {
                  "fallback did not perform the primary single update");
     return ok;
 }
+
+// 验证三区域边界、正反转方向映射和 Golden > Appearing > Disappearing 优先级。
+bool armorVisibilityRegionTest() {
+    bool ok = true;
+    const cv::Point2d camera_to_center(0.0, 1.0);
+    const double appearing_angle = directedArmorVisibilityAngle(
+        camera_to_center, -kPi / 2.0 + 0.01, 1);
+    const double golden_angle = directedArmorVisibilityAngle(
+        camera_to_center, 0.0, 1);
+    const double disappearing_angle = directedArmorVisibilityAngle(
+        camera_to_center, kPi / 2.0 - 0.01, 1);
+    const double reverse_appearing_angle = directedArmorVisibilityAngle(
+        camera_to_center, kPi / 2.0 - 0.01, -1);
+
+    ok &= expect(classifyArmorVisibilityRegion(appearing_angle) ==
+                     ArmorVisibilityRegion::Appearing,
+                 "positive rotation appearing region is wrong");
+    ok &= expect(classifyArmorVisibilityRegion(golden_angle) ==
+                     ArmorVisibilityRegion::GoldenShooting,
+                 "front-facing armor is not in golden region");
+    ok &= expect(classifyArmorVisibilityRegion(disappearing_angle) ==
+                     ArmorVisibilityRegion::Disappearing,
+                 "positive rotation disappearing region is wrong");
+    ok &= expect(classifyArmorVisibilityRegion(reverse_appearing_angle) ==
+                     ArmorVisibilityRegion::Appearing,
+                 "negative rotation did not swap appearing direction");
+    ok &= expect(classifyArmorVisibilityRegion(kPi / 4.0) ==
+                     ArmorVisibilityRegion::GoldenShooting,
+                 "45-degree boundary is not left-closed golden region");
+    ok &= expect(classifyArmorVisibilityRegion(3.0 * kPi / 4.0) ==
+                     ArmorVisibilityRegion::Disappearing,
+                 "135-degree boundary is not left-closed disappearing region");
+
+    ok &= expect(selectArmorByVisibilityRegion(
+                     {ArmorVisibilityRegion::Appearing,
+                      ArmorVisibilityRegion::GoldenShooting}, 0) == 1,
+                 "golden region did not beat appearing region");
+    ok &= expect(selectArmorByVisibilityRegion(
+                     {ArmorVisibilityRegion::GoldenShooting,
+                      ArmorVisibilityRegion::GoldenShooting}, 1) == 1,
+                 "equal-priority selection did not retain current armor");
+    ok &= expect(selectArmorByVisibilityRegion(
+                     {ArmorVisibilityRegion::Disappearing,
+                      ArmorVisibilityRegion::Appearing}, 0) == 1,
+                 "appearing region did not beat disappearing region");
+    return ok;
+}
+
+// 根据给定车体相位和物理装甲板 ID 生成理想旋转观测，供拟合测试使用。
+// 输出位置单位为毫米、偏航角单位为弧度、时间单位为秒。
+EKFTargetObservation rotatingObservation(
+    double t, double phase, int armor_id) {
+    constexpr double center_x_m = 3.0;
+    constexpr double center_y_m = 0.0;
+    constexpr double radius_m = 0.2;
+    const double angle = phase + armor_id * kPi / 2.0;
+    return EKFTargetObservation{
+        (center_x_m - radius_m * std::cos(angle)) * 1000.0,
+        (center_y_m - radius_m * std::sin(angle)) * 1000.0,
+        0.0,
+        angle - kPi / 2.0,
+        t,
+    };
+}
+
+// 构造跨物理装甲板 ID 的匀速旋转序列，验证相位解包后的最小二乘 w。
+// 同时检查拟合值已真正回写到预测器状态，而非只保存在诊断字段中。
+bool angularVelocityLeastSquaresTest() {
+    auto config = std::make_shared<YAML::Node>(YAML::Load(R"(
+superpower_ekf:
+  min_detect_count: 1
+  max_temp_lost_count: 10
+  max_dt_s: 0.1
+  initial_radius_m: 0.2
+  armor_num: 4
+  angular_velocity_fit:
+    window_s: 0.20
+    min_samples: 4
+)"));
+    constexpr double expected_w = 2.0;
+    constexpr double initial_phase = 0.2;
+    SuperPowerPredictor predictor(
+        rotatingObservation(0.0, initial_phase, 0), 200.0, config);
+    for (int frame = 1; frame <= 10; ++frame) {
+        const double t = 0.02 * frame;
+        const int armor_id = frame < 6 ? 0 : 1;
+        predictor.update(rotatingObservation(
+            t, initial_phase + expected_w * t, armor_id));
+    }
+
+    const EKFTargetDebugState debug = predictor.debugState();
+    bool ok = true;
+    ok &= expect(predictor.ready(), "predictor did not enter TRACKING");
+    ok &= expect(debug.phase_observer_valid,
+                 "least-squares phase observer did not become valid");
+    ok &= expect(debug.phase_w_applied,
+                 "least-squares angular velocity was not applied");
+    ok &= expect(std::abs(predictor.state().w - expected_w) < 0.10,
+                 "least-squares angular velocity is inaccurate");
+    return ok;
+}
 }  // namespace
 
 int main() {
@@ -103,6 +206,8 @@ int main() {
     ok &= adjacentCandidateTest(-0.28, kPi / 2.0, 1);
     ok &= adjacentCandidateTest(0.28, -kPi / 2.0, 3);
     ok &= fallbackTest();
+    ok &= armorVisibilityRegionTest();
+    ok &= angularVelocityLeastSquaresTest();
     if (ok) {
         std::cout << "SuperPower joint update tests passed" << std::endl;
         return 0;

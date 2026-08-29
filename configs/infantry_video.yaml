@@ -23,7 +23,7 @@ RP24_YOLO_model_relative_path : "assets/models/RP24_YOLO/0526_dynamic.onnx" # RP
 RP24_YOLO_device : "CPU"
 RP24_YOLO_model_family : "rp24" # rp24 或 tongji_yolov5（同济模型颜色/类别语义不同）
 RP24_YOLO_letterbox : false # 同济模型用 letterbox；rp24/0526 模型训练时是拉伸，需保持一致
-RP24_YOLO_input_size : 352 # 模型输入边长，必须与模型一致（动态模型支持 320/512/640，须能被32整除）
+RP24_YOLO_input_size : 512 # 模型输入边长，必须与模型一致（动态模型支持 320/512/640，须能被32整除）
 RP24_YOLO_infer_threads : 4 # 推理总线程数（基线：全核自由调度时 8 线程 ≈10.8ms）
 RP24_YOLO_infer_streams : 1 # 并发推理请求数（本机 4 个物理 P 核撑不起 2 流）
 
@@ -61,6 +61,9 @@ superpower_ekf:
   max_dt_s: 0.1
   initial_radius_m: 0.38
   armor_num: 4
+  angular_velocity_fit:
+    window_s: 0.20  # 最小二乘角速度拟合窗口，单位 s
+    min_samples: 4  # 开始回写拟合角速度所需的最少样本数
   comparison:
     enabled: true
   joint_update:
@@ -84,7 +87,7 @@ visualizer:
   draw:
     joint_ekf_pair: true
 
-frame_rate : 90.0 # fps；输入应≤流水线处理能力，否则队列积压拉高端到端延迟
+frame_rate : 50.0 # fps；输入应≤流水线处理能力，否则队列积压拉高端到端延迟
 serial_delay_time : 30.0 # ms 电控传来的信息相对相机画面快的时间，将对电控信息再延迟这个时间以同步两者
 serial_port : "" # 电控主串口，如 "/dev/ttyACM1"；留空 = 自动检测（跳过产品名含 IMU 的口）
 log_send_commands : true # 打开后每帧把实际下发的 pitch/yaw/fire 打到控制台，便于核对下位机收到的内容
@@ -136,6 +139,8 @@ aim_center_yaw_bias_expand : 0.0
 low_vyaw_change_target_delta_yaw_threshold_degree : 30.0
 low_vyaw_threshold : 0.3
 choose_armor_yaw_bias_degree : 15.0
+choose_armor_region_hysteresis_degree : 5.0 # 新板越过45度边界后的切换迟滞
+choose_armor_switch_confirm_frames : 2 # 候选区域连续满足多少帧后提交切板
 
 # Params.h 参数设置
 min_light_height : 8

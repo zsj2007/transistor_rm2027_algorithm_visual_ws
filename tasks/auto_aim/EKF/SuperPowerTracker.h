@@ -63,6 +63,8 @@ public:
         const ArmorObservation& secondary,
         double dt);
     void clear();
+    // 将外层拟合得到的角速度转交给当前 Target；无目标时不执行操作。
+    void setAngularVelocity(double angular_velocity);
 
     // SP 进入 LOST 后可能仍在内部缓存 Target，但不会把它提供给下游。
     // 此处保持同一可观察语义：LOST 一律视为没有可用状态。

@@ -23,7 +23,7 @@ RP24_YOLO_model_relative_path : "assets/models/RP24_YOLO/0526_dynamic.xml" # RP2
 RP24_YOLO_device : "CPU"
 RP24_YOLO_model_family : "rp24" # rp24 或 tongji_yolov5（同济模型颜色/类别语义不同）
 RP24_YOLO_letterbox : false # 同济模型用 letterbox；rp24/0526 模型训练时是拉伸，需保持一致
-RP24_YOLO_input_size : 640 # 模型输入边长（动态模型支持 320/512/640，须能被 32 整除；降分辨率提帧率，需重新标定）
+RP24_YOLO_input_size : 480 # 模型输入边长（动态模型支持 320/512/640，须能被 32 整除；降分辨率提帧率，需重新标定）
 RP24_YOLO_infer_threads : 8 # 推理总线程数（基线：全核自由调度时 8 线程 ≈10.8ms）
 RP24_YOLO_infer_streams : 1 # 并发推理请求数（本机 4 个物理 P 核撑不起 2 流）
 
@@ -39,7 +39,7 @@ no_target_hold_position : true # 无目标时：false=回 0 位（原行为）�
 torque_controller:
   dt_control : 0.01            # 控制周期 s（后台 100Hz 发送）
   mpc_pred_N : 20              # MPC 预测步数（yaw 目标延迟 = dt_control × N = 0.2s，有意设计）
-  state_delay_ms : 20.0        # 状态反馈延迟对齐（torque 通道独立配置，默认 20ms；serial 通道用顶层 serial_delay_time）
+  state_delay_ms : 0.0         # 硬件帧时间接入后仅作残余偏移微调；不要再固定减 20ms
   J : 0.016541                 # 辨识参数：转动惯量
   tau_c : 0.097297             # 辨识参数：库仑摩擦
   b : 0.0321                   # 辨识参数：粘滞摩擦
@@ -52,7 +52,7 @@ torque_controller:
   max_iter : 30                # MPC 最大迭代
   integral_gain : 0.01         # yaw 力矩积分补偿比例系数
   yaw_torque_only_mode : false # 仅力矩控制模式
-  integral_enable : false      # 是否启用 yaw 力矩积分补偿
+  integral_enable : true      # 是否启用 yaw 力矩积分补偿
   sequence_mode : false        # 是否使用序列模式（暂未接入）
   # MCU 数据线性标定（默认 = Infantry1 当前标定；其他车参考 ~/TorqueController/data/cars/*/LinearParams.txt）
   send_pitch_scale : 20.523245
@@ -75,6 +75,15 @@ delta_z_ : 30.0
 pc_ip : "192.168.10.25"
 cam_ip : "192.168.10.10"
 
+# 海康帧时间：设备时钟经 GevTimestampControlLatch 映射到主机 steady_clock，
+# 再用每帧 nDevTimeStampHigh/Low 查询同一时刻的云台状态。
+camera_timestamp:
+  use_device_timestamp : true  # 不支持设备时间戳时自动回退，不会中断取流
+  fallback_delay_ms : 20.0     # 仅回退路径使用：SDK 到帧时刻的旧近似
+  exposure_offset_ratio : 0.5  # 设备帧时间按曝光起点解释，+0.5×曝光得到曝光中点
+  sync_samples : 8             # 初次锁存次数，选控制命令 RTT 最小的样本
+  resync_interval_s : 5.0      # 周期重同步以跟踪相机/主机晶振漂移；<=0 表示关闭
+
 video_relative_path : "assets/InputVideo/infantry_blue.mp4" # 使用视频输入时的视频路径
 images_relative_path : "assets/InputImages" # 使用图片输入时的图片文件夹路径
 
@@ -94,10 +103,13 @@ superpower_ekf:
   max_dt_s: 0.1
   initial_radius_m: 0.38
   armor_num: 4
+  angular_velocity_fit:
+    window_s: 0.20  # 最小二乘角速度拟合窗口，单位 s
+    min_samples: 4  # 开始回写拟合角速度所需的最少样本数
   comparison:
     enabled: false
   joint_update:
-    enabled: false
+    enabled: true
     min_consecutive_frames: 2
 
 # 可视化设置
@@ -135,7 +147,7 @@ cpu_pinning:
   yolo_enable_hyper_threading: true
 
 pre_predict_time_not_aim : 500.0 # ms 在看到目标的这段时间内不启动自瞄
-pre_predict_time : 200000000.0 # ms 在看到目标的这段时间内直接瞄准当前装甲板位置，待有足够观测值后再使用预测值
+pre_predict_time : 2000.0 # ms 在看到目标的这段时间内直接瞄准当前装甲板位置，待有足够观测值后再使用预测值
 reset_predictor_time : 1000.0 # ms 超过这段时间未观测到某一类装甲板，将停止这一类装甲板的预测并重置预测器
 
 # 控制PID参数
@@ -153,12 +165,14 @@ command_yaw_integration_max_speed_degree: 5.0
 # 火控设置
 after_target_change_ceasefire_ms : 300
 before_target_change_ceasefire_ms : 100
-aim_center_vyaw_upper_threshold : 2.5
-aim_center_vyaw_lower_threshold : 2.0
+aim_center_vyaw_upper_threshold : 10.5
+aim_center_vyaw_lower_threshold : 6.0
 aim_center_yaw_bias_expand : 0.0
 low_vyaw_change_target_delta_yaw_threshold_degree : 30.0
 low_vyaw_threshold : 0.3
 choose_armor_yaw_bias_degree : 15.0
+choose_armor_region_hysteresis_degree : 5.0 # 新板越过45度边界后的切换迟滞
+choose_armor_switch_confirm_frames : 2 # 候选区域连续满足多少帧后提交切板
 
 # Params.h 参数设置
 min_light_height : 8

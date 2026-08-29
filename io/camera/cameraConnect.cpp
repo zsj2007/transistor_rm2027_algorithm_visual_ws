@@ -3,12 +3,22 @@
 #include <iomanip>
 #include <cstring>
 #include <chrono>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <utility>  // std::swap
 
 using namespace std::chrono;
 
+namespace {
+double steadySeconds(const steady_clock::time_point& t) {
+    return duration<double>(t.time_since_epoch()).count();
+}
+}  // namespace
+
 // GigE相机构造函数
-Camera::Camera(const std::string& deviceIp, const std::string& netIp) 
+Camera::Camera(const std::string& deviceIp, const std::string& netIp,
+               const CameraTimestampConfig& timestampConfig)
     : handle(nullptr)
     , status(DISCONNECTED)
     , cameraType(GIGE_CAMERA)
@@ -19,7 +29,8 @@ Camera::Camera(const std::string& deviceIp, const std::string& netIp)
     , grabbing(false)
     , needReconnect(false)
     , exposureTime(5000)
-    , gain(16.0) {
+    , gain(16.0)
+    , timestampConfig_(timestampConfig) {
     
     std::cout << "GigE Camera created with IP: " << deviceIp << std::endl;
 }
@@ -36,7 +47,8 @@ Camera::Camera(int deviceIndex)
     , grabbing(false)
     , needReconnect(false)
     , exposureTime(5000)
-    , gain(16.0) {
+    , gain(16.0)
+    , timestampConfig_() {
     
     std::cout << "USB Camera created with device index: " << deviceIndex << std::endl;
 }
@@ -221,11 +233,16 @@ void Camera::grabLoop() {
         
         // 取流循环
         while (running.load() && grabbing.load()) {
+            //检查是否需要重设摄像机内部时间与主机时间之间的差值
+            maybeResyncTimestampClock();
             nRet = MV_CC_GetOneFrameTimeout(handle, pData, nPayloadSize, &stImageInfo, 1000);
             
             if (nRet == MV_OK) {
-                const double frame_timestamp_s = duration<double>(
-                    steady_clock::now().time_since_epoch()).count();
+                const auto arrival_time = steady_clock::now();
+                const double arrival_timestamp_s = steadySeconds(arrival_time);
+                bool timestamp_from_device = false;
+                const double frame_timestamp_s = resolveFrameTimestamp(
+                    stImageInfo, arrival_time, timestamp_from_device);
                 const std::uint64_t frame_id = next_frame_id++;
                 // 检查帧数据完整性
                 if (stImageInfo.nFrameLen > 0) {
@@ -238,8 +255,37 @@ void Camera::grabLoop() {
                         g_frame_packet.image = processedImage.clone();
                         g_frame_packet.timestamp_s = frame_timestamp_s;
                         g_frame_packet.frame_id = frame_id;
+                        g_frame_packet.arrival_timestamp_s = arrival_timestamp_s;
+                        g_frame_packet.device_timestamp_ticks =
+                            (static_cast<std::uint64_t>(stImageInfo.nDevTimeStampHigh) << 32) |
+                            static_cast<std::uint64_t>(stImageInfo.nDevTimeStampLow);
+                        g_frame_packet.sdk_host_timestamp = stImageInfo.nHostTimeStamp;
+                        g_frame_packet.exposure_time_us =
+                            stImageInfo.fExposureTime > 0.0f
+                                ? static_cast<double>(stImageInfo.fExposureTime)
+                                : static_cast<double>(exposureTime);
+                        g_frame_packet.clock_sync_uncertainty_us = timestampSyncUncertaintyUs_;
+                        g_frame_packet.timestamp_from_device = timestamp_from_device;
                         image_used = false;
                         pthread_mutex_unlock(&g_mutex);
+
+                        static auto last_timestamp_log = steady_clock::time_point{};
+                        if (last_timestamp_log.time_since_epoch().count() == 0 ||
+                            arrival_time - last_timestamp_log >= seconds(1)) {
+                            last_timestamp_log = arrival_time;
+                            std::cout << std::fixed << std::setprecision(3)
+                                      << "[camera-ts] source="
+                                      << (timestamp_from_device ? "hik_device" : "arrival_fallback")
+                                      << " frame=" << frame_id
+                                      << " sdk_frame=" << stImageInfo.nFrameNum
+                                      << " exposure_us=" << g_frame_packet.exposure_time_us
+                                      << " arrival_minus_frame_ms="
+                                      << (arrival_timestamp_s - frame_timestamp_s) * 1000.0
+                                      << " sync_uncertainty_us=" << timestampSyncUncertaintyUs_
+                                      << " dev_ticks=" << g_frame_packet.device_timestamp_ticks
+                                      << " sdk_host_ts=" << stImageInfo.nHostTimeStamp
+                                      << std::endl;
+                        }
                     }
                 }
             } else {
@@ -344,6 +390,13 @@ bool Camera::tryConnectGigE() {
         MV_CC_DestroyHandle(handle);
         handle = nullptr;
         return false;
+    }
+
+    // 初始化相机
+    resetTimestampSync();
+    if (timestampConfig_.use_device_timestamp && !initializeTimestampSync()) {
+        std::cerr << "Hikrobot device timestamp unavailable; using arrival-time fallback ("
+                  << timestampConfig_.fallback_delay_ms << " ms)." << std::endl;
     }
     
     return true;
@@ -520,6 +573,147 @@ bool Camera::initCameraCommonParams() {
     }
     
     return true;
+}
+
+// 清空上一次相机连接留下的时间同步状态
+void Camera::resetTimestampSync() {
+    timestampSyncValid_ = false;
+    deviceTimestampFrequencyHz_ = 0.0;
+    deviceToSteadyOffsetS_ = 0.0;
+    timestampSyncUncertaintyUs_ = 0.0;
+    lastTimestampSync_ = steady_clock::time_point{};
+}
+
+// 相机连接成功后，初始化硬件时间戳系统
+bool Camera::initializeTimestampSync() {
+    if (handle == nullptr || cameraType != GIGE_CAMERA ||
+        !timestampConfig_.use_device_timestamp) {
+        return false;
+    }
+
+    MVCC_INTVALUE_EX frequency;
+    memset(&frequency, 0, sizeof(frequency));
+    int nRet = MV_CC_GetIntValueEx(handle, "GevTimestampTickFrequency", &frequency);
+    if (nRet != MV_OK || frequency.nCurValue <= 0) {
+        // Some GenICam XMLs expose the newer standard node name.
+        memset(&frequency, 0, sizeof(frequency));
+        nRet = MV_CC_GetIntValueEx(handle, "DeviceTimestampTickFrequency", &frequency);
+    }
+    if (nRet != MV_OK || frequency.nCurValue <= 0) {
+        std::cerr << "Get camera timestamp frequency fail! nRet [0x"
+                  << std::hex << nRet << std::dec << "]" << std::endl;
+        return false;
+    }
+
+    deviceTimestampFrequencyHz_ = static_cast<double>(frequency.nCurValue);
+    const bool ok = calibrateTimestampSync(
+        std::max(1, timestampConfig_.sync_samples), false);
+    if (ok) {
+        std::cout << std::fixed << std::setprecision(3)
+                  << "Hikrobot timestamp sync ready: frequency="
+                  << deviceTimestampFrequencyHz_ << " Hz, uncertainty<="
+                  << timestampSyncUncertaintyUs_ << " us" << std::endl;
+    }
+    return ok;
+}
+
+// 核心的校时函数
+// 计算最佳时间偏移量offset_s
+bool Camera::calibrateTimestampSync(int sampleCount, bool smoothUpdate) {
+    if (handle == nullptr || deviceTimestampFrequencyHz_ <= 0.0) return false;
+
+    double best_rtt_s = std::numeric_limits<double>::infinity();
+    double best_offset_s = 0.0;
+    bool got_sample = false;
+
+    for (int i = 0; i < std::max(1, sampleCount); ++i) {
+        const auto command_start = steady_clock::now();
+        const int latch_ret = MV_CC_SetCommandValue(handle, "GevTimestampControlLatch");
+        const auto command_end = steady_clock::now();
+        if (latch_ret != MV_OK) continue;
+
+        MVCC_INTVALUE_EX latched;
+        memset(&latched, 0, sizeof(latched));
+        const int read_ret = MV_CC_GetIntValueEx(handle, "GevTimestampValue", &latched);
+        if (read_ret != MV_OK || latched.nCurValue < 0) continue;
+
+        // The latch instant lies within this command round trip. The midpoint
+        // is our estimate and half the RTT is a conservative uncertainty bound.
+        const double rtt_s = duration<double>(command_end - command_start).count();
+        if (rtt_s < best_rtt_s) {
+            const double host_mid_s =
+                0.5 * (steadySeconds(command_start) + steadySeconds(command_end));
+            best_offset_s = host_mid_s -
+                static_cast<double>(latched.nCurValue) / deviceTimestampFrequencyHz_;
+            best_rtt_s = rtt_s;
+            got_sample = true;
+        }
+    }
+
+    if (!got_sample) return false;
+
+    if (!timestampSyncValid_ || !smoothUpdate) {
+        deviceToSteadyOffsetS_ = best_offset_s;
+    } else {
+        const double delta_s = best_offset_s - deviceToSteadyOffsetS_;
+        if (std::abs(delta_s) > 0.050) {
+            std::cerr << "Camera clock resync rejected: offset jumped by "
+                      << delta_s * 1000.0 << " ms" << std::endl;
+            return false;
+        }
+        // Suppress control-channel jitter while still tracking clock drift.
+        deviceToSteadyOffsetS_ += 0.2 * delta_s;
+    }
+
+    timestampSyncUncertaintyUs_ = best_rtt_s * 0.5e6;
+    timestampSyncValid_ = true;
+    lastTimestampSync_ = steady_clock::now();
+    return true;
+}
+
+// 定期重新同步相机和主机时钟
+// 当偏移量误差重新变大时 重新设置
+void Camera::maybeResyncTimestampClock() {
+    if (!timestampSyncValid_ || timestampConfig_.resync_interval_s <= 0.0) return;
+    const auto interval = duration<double>(timestampConfig_.resync_interval_s);
+    if (steady_clock::now() - lastTimestampSync_ >= interval) {
+        calibrateTimestampSync(
+            std::min(3, std::max(1, timestampConfig_.sync_samples)), true);
+    }
+}
+
+// 把一帧的海康设备时间戳转换成最终用于查询云台姿态的时间
+// arrival为图像送至SDK的时间
+double Camera::resolveFrameTimestamp(
+    const MV_FRAME_OUT_INFO_EX& frameInfo,
+    steady_clock::time_point arrival,
+    bool& fromDevice) const {
+    const double arrival_s = steadySeconds(arrival);
+    fromDevice = false;
+
+    const std::uint64_t device_ticks =
+        (static_cast<std::uint64_t>(frameInfo.nDevTimeStampHigh) << 32) |
+        static_cast<std::uint64_t>(frameInfo.nDevTimeStampLow);
+    if (timestampSyncValid_ && device_ticks != 0) {
+        const double exposure_us = frameInfo.fExposureTime > 0.0f
+            ? static_cast<double>(frameInfo.fExposureTime)
+            : static_cast<double>(exposureTime);
+        const double frame_s =
+            static_cast<double>(device_ticks) / deviceTimestampFrequencyHz_ +
+            deviceToSteadyOffsetS_ +
+            timestampConfig_.exposure_offset_ratio * exposure_us * 1e-6;
+        const double age_s = arrival_s - frame_s;
+
+        // Reject a mismatched node/unit instead of feeding a wildly wrong time
+        // into pose history. Normal exposure + readout + GigE transport is
+        // positive and comfortably below this two-second guard.
+        if (age_s >= -0.010 && age_s <= 2.0) {
+            fromDevice = true;
+            return frame_s;
+        }
+    }
+
+    return arrival_s - timestampConfig_.fallback_delay_ms * 1e-3;
 }
 
 bool Camera::processImage(unsigned char* pData, MV_FRAME_OUT_INFO_EX& stImageInfo, cv::Mat& outputImage) {

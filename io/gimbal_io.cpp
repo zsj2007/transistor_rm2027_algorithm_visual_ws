@@ -53,15 +53,15 @@ struct TorqueGimbalSender::Impl
   double last_pitch_target_deg_ = 0.0;    // 最近一次 set() 的 pitch（视觉→torque 的角度）
   double last_pitch_proto_ = 0.0;         // 线性映射后实际下发的 pitch 协议值
 
-  // ---- 状态反馈延迟对齐（语义与 serial 通道 serial_delay_time 一致）----
-  // 后台 200Hz 采样融合状态，state(t) 返回“t - state_delay_ms”时刻的样本，
-  // 让弹道解算拿到的姿态与图像同一时刻；仅缓存 fused.valid 后的锚定样本。
+  // ---- 图像时刻状态查询 ----
+  // 后台 200Hz 采样融合状态，state(t) 查询图像硬件时间戳对应的样本。
+  // state_delay_ms 仅作为剩余标定误差的人工微调；仅缓存 fused.valid 样本。
   struct TorqueStateSample
   {
     std::chrono::steady_clock::time_point ts;
     io::State state;
   };
-  double state_delay_ms_ = 20.0;   // torque 通道独立配置（torque_controller.state_delay_ms）
+  double state_delay_ms_ = 0.0;    // torque 通道残余时间偏移微调
   mutable std::mutex sample_mtx_;
   std::deque<TorqueStateSample> samples_;
   std::atomic<bool> sampler_running_{false};
@@ -78,8 +78,8 @@ TorqueGimbalSender::TorqueGimbalSender(const std::string & config_path)
   auto yaml = tools::load(config_path);
   const YAML::Node tc = yaml["torque_controller"];
 
-  // 状态反馈延迟对齐：torque 通道独立配置，默认 20ms；
-  // 不复用 serial 通道的 serial_delay_time，避免改到串口通道的调校值
+  // 海康设备帧时间已映射到 steady_clock；这里默认不再固定减 20ms。
+  // 该值只用于实车标定后的残余偏移微调，且不影响 serial 通道。
   if (tc["state_delay_ms"]) {
     impl_->state_delay_ms_ = tc["state_delay_ms"].as<double>();
   }
@@ -219,9 +219,11 @@ io::State TorqueGimbalSender::state(std::chrono::steady_clock::time_point t) con
     return fresh;
   }
 
-  // 延迟对齐：返回 t - state_delay_ms 时刻最接近的样本（与 serial 通道语义一致）
-  const auto target =
-    t - std::chrono::milliseconds(static_cast<int64_t>(impl_->state_delay_ms_));
+  // 返回硬件帧时间 t 附近的样本；可用 state_delay_ms 做残余微调。
+  const auto residual_delay = std::chrono::duration<double, std::milli>(
+    impl_->state_delay_ms_);
+  const auto target = t - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    residual_delay);
   const TorqueGimbalSender::Impl::TorqueStateSample * best = nullptr;
   auto best_dist = std::chrono::steady_clock::duration::max();
   for (const auto & smp : impl_->samples_) {

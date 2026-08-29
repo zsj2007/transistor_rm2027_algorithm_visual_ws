@@ -101,6 +101,11 @@ void Tracker::clear() {
     target_.reset();
 }
 
+// 仅在当前 Target 存在时回写拟合角速度，保持 LOST 状态下的空操作语义。
+void Tracker::setAngularVelocity(double angular_velocity) {
+    if (target_) target_->setAngularVelocity(angular_velocity);
+}
+
 bool Tracker::setTarget(const ArmorObservation& observation) {
     // SP Tracker::set_target() 的普通四装甲初始化分支。
     target_.emplace(observation,

@@ -53,6 +53,8 @@ public:
 
     // 按 dt 执行匀速位置和匀角速 yaw 的时间预测。
     void predict(double dt);
+    // 使用滑窗最小二乘拟合值覆盖角速度 w，其他后验状态保持不变。
+    void setAngularVelocity(double angular_velocity);
     // 为观测选择最匹配的装甲编号，再执行 EKF 量测更新。
     TargetUpdateDebug update(const ArmorObservation& armor);
     // 同一时间戳的双板联合更新。主板沿用现有关联，副板只枚举相邻拓扑；
